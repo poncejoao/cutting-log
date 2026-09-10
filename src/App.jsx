@@ -1038,6 +1038,8 @@ const CSS = `
 }
 
 *{box-sizing:border-box;}
+html,body{margin:0;padding:0;background:var(--bg);}
+#root{min-height:100vh;}
 .app{
   font-family:'IBM Plex Sans',sans-serif;
   background:var(--bg);
@@ -1048,6 +1050,18 @@ const CSS = `
   display:flex;
   flex-direction:column;
   padding-bottom:76px;
+}
+@media (min-width:640px){
+  html,body{background:#141110;}
+  #root{display:flex;justify-content:center;min-height:100vh;}
+  .app{
+    min-height:calc(100vh - 48px);
+    margin:24px auto;
+    border:1px solid var(--border);
+    border-radius:20px;
+    box-shadow:0 30px 60px -20px rgba(0,0,0,0.6);
+    overflow:hidden;
+  }
 }
 .mono{font-family:'IBM Plex Mono',monospace;}
 .muted{color:var(--muted);}
