@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["icon-192-v2.png", "icon-512-v2.png"],
+      includeAssets: ["icon-192-v3.png", "icon-512-v3.png"],
       manifest: {
         name: "Cutting Log",
         short_name: "Cutting Log",
@@ -17,8 +17,8 @@ export default defineConfig({
         display: "standalone",
         start_url: "/",
         icons: [
-          { src: "icon-192-v2.png", sizes: "192x192", type: "image/png" },
-          { src: "icon-512-v2.png", sizes: "512x512", type: "image/png" },
+          { src: "icon-192-v3.png", sizes: "192x192", type: "image/png" },
+          { src: "icon-512-v3.png", sizes: "512x512", type: "image/png" },
         ],
       },
       workbox: {
