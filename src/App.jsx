@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2 } from "lucide-react";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
 // gráficos da aba Progresso — carrega sob demanda em vez de no boot do app.
@@ -104,6 +104,7 @@ const DEFAULT_SETTINGS = {
   exerciseVariations: {},
   exerciseSubstitutions: {},
   exerciseOrder: {},
+  favoriteMeals: [],
 };
 
 // ---------- Helpers ----------
@@ -273,7 +274,7 @@ export default function App() {
           />
         )}
         {tab === "dieta" && (
-          <DietaTab dietCat={dietCat} settings={settings} dayEntry={dayEntry} updateDay={updateDay} />
+          <DietaTab dietCat={dietCat} settings={settings} setSettings={setSettings} dayEntry={dayEntry} updateDay={updateDay} />
         )}
         {tab === "progresso" && <ProgressoTab logs={logs} settings={settings} />}
       </main>
@@ -617,7 +618,7 @@ function ExerciseCard({
         </button>
       </div>
       <div className="ex-head">
-        <div>
+        <div className="ex-info">
           <div className="ex-name-row">
             <Repeat size={11} className="swap-icon" />
             <select
@@ -704,7 +705,7 @@ function ExerciseCard({
 }
 
 // ---------------- Dieta ----------------
-function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
+function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay }) {
   const target = DIET_TARGETS[dietCat];
   const fatTarget = dietCat === "Treino" ? settings.fatTraining : settings.fatRest;
   const targetKcal = kcal(target.protein, target.carb, fatTarget);
@@ -751,6 +752,36 @@ function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
     updateDay({ meals: meals.filter((_, i) => i !== idx) });
   }
 
+  const favorites = settings.favoriteMeals || [];
+
+  function saveFavorite(macros, suggestedName) {
+    const name = window.prompt("Salvar como favorito com que nome?", suggestedName || "");
+    if (!name || !name.trim()) return;
+    const fav = {
+      id: Date.now().toString(36),
+      name: name.trim(),
+      protein: macros.protein || 0,
+      carb: macros.carb || 0,
+      fat: macros.fat || 0,
+    };
+    setSettings((prev) => ({ ...prev, favoriteMeals: [...(prev.favoriteMeals || []), fav] }));
+  }
+
+  function addFavoriteAsMeal(fav) {
+    updateDay({ meals: [...meals, { name: fav.name, protein: fav.protein, carb: fav.carb, fat: fav.fat }] });
+  }
+
+  function renameFavorite(id, newName) {
+    setSettings((prev) => ({
+      ...prev,
+      favoriteMeals: (prev.favoriteMeals || []).map((f) => (f.id === id ? { ...f, name: newName } : f)),
+    }));
+  }
+
+  function deleteFavorite(id) {
+    setSettings((prev) => ({ ...prev, favoriteMeals: (prev.favoriteMeals || []).filter((f) => f.id !== id) }));
+  }
+
   return (
     <div className="stack">
       <div className="section-title">{dietCat === "Treino" ? "Meta · dia de treino" : "Meta · dia de descanso"}</div>
@@ -767,6 +798,21 @@ function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
           Falta: {Math.round(remaining.protein)}g P · {Math.round(remaining.carb)}g C · {Math.round(remaining.fat)}g G
         </div>
       </div>
+
+      {favorites.length > 0 && (
+        <div className="card">
+          <div className="card-head">Favoritos</div>
+          {favorites.map((fav) => (
+            <FavoriteRow
+              key={fav.id}
+              fav={fav}
+              onAdd={() => addFavoriteAsMeal(fav)}
+              onRename={(n) => renameFavorite(fav.id, n)}
+              onDelete={() => deleteFavorite(fav.id)}
+            />
+          ))}
+        </div>
+      )}
 
       <div className="card">
         <div className="mode-toggle">
@@ -813,6 +859,13 @@ function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
             <button className="btn-primary" onClick={addFoodMeal} disabled={!matchedFood || !grams}>
               <Plus size={16} /> Registrar
             </button>
+            <button
+              className="btn-secondary"
+              onClick={() => saveFavorite(previewMacros, matchedFood?.n)}
+              disabled={!previewMacros}
+            >
+              <Star size={14} /> Salvar como favorito
+            </button>
           </>
         ) : (
           <>
@@ -851,6 +904,22 @@ function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
             <button className="btn-primary" onClick={addManualMeal}>
               <Plus size={16} /> Registrar
             </button>
+            <button
+              className="btn-secondary"
+              onClick={() =>
+                saveFavorite(
+                  {
+                    protein: parseFloat(manualForm.protein) || 0,
+                    carb: parseFloat(manualForm.carb) || 0,
+                    fat: parseFloat(manualForm.fat) || 0,
+                  },
+                  manualForm.name
+                )
+              }
+              disabled={!manualForm.name.trim()}
+            >
+              <Star size={14} /> Salvar como favorito
+            </button>
           </>
         )}
       </div>
@@ -874,6 +943,66 @@ function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function FavoriteRow({ fav, onAdd, onRename, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(fav.name);
+
+  function confirmRename() {
+    const trimmed = name.trim();
+    if (trimmed) onRename(trimmed);
+    else setName(fav.name);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <div className="meal-row favorite-row">
+        <input
+          className="input favorite-rename-input"
+          value={name}
+          autoFocus
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") confirmRename();
+            if (e.key === "Escape") {
+              setName(fav.name);
+              setEditing(false);
+            }
+          }}
+        />
+        <div className="favorite-actions">
+          <button className="icon-btn" onClick={confirmRename} aria-label="Confirmar novo nome">
+            <Check size={16} />
+          </button>
+          <button className="icon-btn" onClick={onDelete} aria-label="Excluir favorito">
+            <Trash2 size={16} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="meal-row favorite-row">
+      <div className="favorite-info">
+        <div className="meal-name">{fav.name}</div>
+        <div className="muted mono meal-macros">
+          {Math.round(fav.protein)}g P · {Math.round(fav.carb)}g C · {Math.round(fav.fat)}g G ·{" "}
+          {kcal(fav.protein, fav.carb, fav.fat)} kcal
+        </div>
+      </div>
+      <div className="favorite-actions">
+        <button className="icon-btn favorite-add" onClick={onAdd} aria-label="Adicionar hoje">
+          <Plus size={16} />
+        </button>
+        <button className="icon-btn" onClick={() => setEditing(true)} aria-label="Renomear favorito">
+          <Pencil size={14} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -1249,18 +1378,20 @@ html,body{margin:0;padding:0;background:var(--bg);}
 }
 .order-btn:disabled{opacity:0.25;cursor:default;}
 .ex-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding-right:38px;}
-.ex-name-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;}
+.ex-info{min-width:0;flex:1;}
+.ex-name-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0;}
 .swap-icon{color:var(--muted);flex-shrink:0;}
 .ex-name-select{
   background:none;border:none;color:var(--text);font-size:14.5px;font-weight:500;
-  font-family:'IBM Plex Sans',sans-serif;padding:0;max-width:210px;cursor:pointer;
+  font-family:'IBM Plex Sans',sans-serif;padding:0;cursor:pointer;
+  min-width:0;max-width:100%;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .variation-chip{
   background:var(--surface-2);border:1px solid var(--border);color:var(--push);
   border-radius:20px;padding:2px 8px;font-size:10.5px;font-family:'IBM Plex Sans',sans-serif;
-  cursor:pointer;max-width:150px;
+  cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;
 }
-.ex-meta{font-size:11.5px;color:var(--muted);white-space:nowrap;margin-top:2px;}
+.ex-meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
 .sub-note{color:var(--legs);}
 .ex-last-badge{
   background:var(--surface-2);border:1px solid var(--border);border-radius:7px;
@@ -1306,6 +1437,12 @@ html,body{margin:0;padding:0;background:var(--bg);}
 .meal-row:first-of-type{border-top:none;}
 .meal-name{font-size:13.5px;}
 .meal-macros{font-size:11.5px;margin-top:2px;}
+
+.favorite-row{gap:10px;}
+.favorite-info{min-width:0;flex:1;}
+.favorite-actions{display:flex;gap:6px;flex-shrink:0;}
+.favorite-add{color:var(--push);border-color:var(--push);}
+.favorite-rename-input{flex:1;}
 
 .empty-state{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:28px 18px;text-align:center;}
 .empty-title{font-family:'Fraunces',serif;font-size:18px;font-weight:650;margin-bottom:6px;}
