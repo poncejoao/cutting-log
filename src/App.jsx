@@ -1,6 +1,14 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
 import { Dumbbell, UtensilsCrossed, TrendingUp, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download } from "lucide-react";
+
+// recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
+// gráficos da aba Progresso — carrega sob demanda em vez de no boot do app.
+const MiniLineChart = lazy(() => import("./MiniLineChart.jsx"));
+const ChartFallback = ({ height = 180 }) => (
+  <div className="chart-loading" style={{ height }}>
+    Carregando gráfico…
+  </div>
+);
 
 // ---------- Static plan data (from João's program) ----------
 const DAY_TYPES = { P: "Push", U: "Pull", L: "Legs", D: "Descanso" };
@@ -515,14 +523,23 @@ function ExerciseCard({
   onMoveDown,
 }) {
   const top = topRep(plan.reps);
-  const [sets, setSets] = useState(logged || Array.from({ length: plan.sets }, () => ({ weight: "", reps: "" })));
+  // Completa com séries vazias até bater o número planejado — tanto pra quem
+  // nunca registrou nada quanto pra dado antigo já salvo com menos séries do
+  // que devia (ex: sobra de quando esse componente ainda tinha o bug de
+  // truncar séries vazias).
+  function fillSets(arr) {
+    const base = (arr || []).slice(0, plan.sets);
+    while (base.length < plan.sets) base.push({ weight: "", reps: "" });
+    return base;
+  }
+  const [sets, setSets] = useState(() => fillSets(logged));
 
   // Re-sincroniza só quando o dia ou o exercício mudam de verdade — não a cada
   // tecla. Ao salvar, as séries vazias são filtradas antes de ir pro storage
   // (pra não guardar lixo), mas esse array "enxuto" não pode voltar e resetar
   // as séries que o usuário ainda está preenchendo na tela.
   useEffect(() => {
-    setSets(logged || Array.from({ length: plan.sets }, () => ({ weight: "", reps: "" })));
+    setSets(fillSets(logged));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate, effectiveName, plan.sets]);
 
@@ -836,20 +853,9 @@ function ProgressoTab({ logs, settings }) {
       <div className="card">
         <div className="card-head">Peso corporal</div>
         {bwData.length >= 2 ? (
-          <div style={{ height: 180 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={bwData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 4" vertical={false} />
-                <XAxis dataKey="date" stroke="var(--muted)" fontSize={11} tickLine={false} axisLine={false} />
-                <YAxis stroke="var(--muted)" fontSize={11} tickLine={false} axisLine={false} domain={["dataMin - 1", "dataMax + 1"]} />
-                <Tooltip
-                  contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
-                  labelStyle={{ color: "var(--text)" }}
-                />
-                <Line type="monotone" dataKey="peso" stroke="var(--push)" strokeWidth={2} dot={{ r: 3 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+          <Suspense fallback={<ChartFallback height={180} />}>
+            <MiniLineChart data={bwData} dataKey="peso" yDomain={["dataMin - 1", "dataMax + 1"]} height={180} valueSuffix="kg" />
+          </Suspense>
         ) : (
           <p className="muted">Registre o peso por alguns dias na aba Hoje pra ver o gráfico.</p>
         )}
@@ -930,21 +936,19 @@ function ExerciseProgressCard({ logs }) {
       </select>
 
       {data.length >= 2 ? (
-        <div style={{ height: 170, marginTop: 12 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-              <CartesianGrid stroke="var(--border)" strokeDasharray="3 4" vertical={false} />
-              <XAxis dataKey="date" stroke="var(--muted)" fontSize={11} tickLine={false} axisLine={false} />
-              <YAxis stroke="var(--muted)" fontSize={11} tickLine={false} axisLine={false} domain={["dataMin - 2", "dataMax + 2"]} />
-              <Tooltip
-                contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
-                labelStyle={{ color: "var(--text)" }}
-                formatter={(value, name) => [name === "carga" ? `${value}kg` : `${value} reps`, name === "carga" ? "Carga máx." : "Reps (série top)"]}
-              />
-              <Line type="monotone" dataKey="carga" stroke="var(--push)" strokeWidth={2} dot={{ r: 3 }} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+        <Suspense fallback={<ChartFallback height={170} />}>
+          <MiniLineChart
+            data={data}
+            dataKey="carga"
+            yDomain={["dataMin - 2", "dataMax + 2"]}
+            height={170}
+            wrapperStyle={{ marginTop: 12 }}
+            tooltipFormatter={(value, name) => [
+              name === "carga" ? `${value}kg` : `${value} reps`,
+              name === "carga" ? "Carga máx." : "Reps (série top)",
+            ]}
+          />
+        </Suspense>
       ) : (
         <p className="muted" style={{ marginTop: 12 }}>
           Registre esse exercício em pelo menos 2 sessões pra ver a evolução.
@@ -1166,6 +1170,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
 }
 
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;}
+.chart-loading{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12.5px;}
 .card-head{font-size:13px;color:var(--muted);margin-bottom:12px;font-weight:500;}
 
 .macro-row{margin-bottom:12px;}
