@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2 } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy } from "lucide-react";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
 // gráficos da aba Progresso — carrega sob demanda em vez de no boot do app.
@@ -607,8 +607,12 @@ function ExerciseCard({
     return entry.sets.every((s) => parseInt(s.reps, 10) >= top);
   }
 
-  const last = history[history.length - 1];
-  const prev = history[history.length - 2];
+  // "history" inclui o dia selecionado assim que ele tem alguma série
+  // preenchida — sem filtrar, "última sessão" e o PR ficariam comparando o
+  // que você está digitando agora com ele mesmo.
+  const pastHistory = history.filter((h) => h.date !== selectedDate);
+  const last = pastHistory[pastHistory.length - 1];
+  const prev = pastHistory[pastHistory.length - 2];
   const lastTwoHitTop = hitTop(last) && hitTop(prev);
   const isSubstituted = substitution !== plan.n;
 
@@ -618,6 +622,11 @@ function ExerciseCard({
       ? { text: `Suba a carga (+2,5–5%) — bateu ${top} reps em todas as séries 2x seguidas`, tone: "up" }
       : { text: `Meta: adicionar 1 rep mantendo RIR ${plan.rir}`, tone: "hold" };
   }
+
+  // PR de carga: maior peso já registrado numa sessão passada desse exercício.
+  const maxPastWeight = Math.max(0, ...pastHistory.flatMap((h) => h.sets.map((s) => parseFloat(s.weight) || 0)));
+  const currentMaxWeight = Math.max(0, ...sets.map((s) => parseFloat(s.weight) || 0));
+  const isNewPR = maxPastWeight > 0 && currentMaxWeight > maxPastWeight;
 
   return (
     <div className="card exercise-card">
@@ -681,10 +690,16 @@ function ExerciseCard({
         )}
       </div>
 
-      {suggestion && (
-        <div className={"suggestion " + suggestion.tone}>
-          <Flame size={13} /> {suggestion.text}
+      {isNewPR ? (
+        <div className="suggestion pr">
+          <Trophy size={13} /> Novo recorde de carga! {currentMaxWeight}kg (antes: {maxPastWeight}kg)
         </div>
+      ) : (
+        suggestion && (
+          <div className={"suggestion " + suggestion.tone}>
+            <Flame size={13} /> {suggestion.text}
+          </div>
+        )
       )}
 
       <div className="set-grid">
@@ -1425,6 +1440,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
 }
 .suggestion.up{background:rgba(198,144,46,0.15);color:var(--push);}
 .suggestion.hold{background:var(--surface-2);color:var(--muted);}
+.suggestion.pr{background:rgba(198,144,46,0.28);color:var(--push);border:1px solid rgba(198,144,46,0.5);font-weight:600;}
 
 .set-grid{margin-top:12px;}
 .set-grid-head, .set-grid-row{
