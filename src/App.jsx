@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange } from "lucide-react";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
 // gráficos da aba Progresso — carrega sob demanda em vez de no boot do app.
@@ -106,7 +106,13 @@ const DEFAULT_SETTINGS = {
   exerciseOrder: {},
   exerciseGrips: {},
   favoriteMeals: [],
+  phases: [],
 };
+
+// Exercícios-âncora usados na comparação de fases — um levantamento composto
+// por dia de treino, pra ter um sinal de força mesmo que outros exercícios
+// tenham sido substituídos ao longo do tempo.
+const ANCHOR_LIFTS = ["Supino reto", "Remada curvada pronada", "Agachamento livre"];
 
 // ---------- Helpers ----------
 const todayISO = (d = new Date()) => {
@@ -130,6 +136,55 @@ const computeFromFood = (food, g) => ({
 // (a tecla parece não fazer nada). Por isso os campos de peso/quantidade usam
 // type="text" + inputMode="decimal" e passam por aqui pra normalizar.
 const sanitizeDecimal = (v) => v.replace(",", ".").replace(/[^0-9.]/g, "");
+
+// ---------- Comparação de fases ----------
+// Acha o primeiro/último dia dentro do intervalo [from, to] em que `pred(v)`
+// devolve um valor (não-nulo) — usado pra achar o peso/carga mais próximo do
+// início e do fim de uma fase, mesmo com registros esparsos.
+function firstInRange(logs, pred, from, to) {
+  const entries = Object.entries(logs)
+    .filter(([d]) => d >= from && (!to || d <= to))
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  for (const [d, v] of entries) {
+    const val = pred(v);
+    if (val != null) return { date: d, value: val };
+  }
+  return null;
+}
+function lastInRange(logs, pred, from, to) {
+  const entries = Object.entries(logs)
+    .filter(([d]) => d >= from && (!to || d <= to))
+    .sort(([a], [b]) => (a < b ? 1 : -1));
+  for (const [d, v] of entries) {
+    const val = pred(v);
+    if (val != null) return { date: d, value: val };
+  }
+  return null;
+}
+const bodyweightPred = (v) => v?.bodyweight ?? null;
+const exerciseMaxWeightPred = (name) => (v) => {
+  const sets = v?.exercises?.[name]?.sets;
+  if (!sets?.length) return null;
+  const w = Math.max(...sets.map((s) => parseFloat(s.weight) || 0));
+  return w > 0 ? w : null;
+};
+
+function computePhaseStats(logs, phase) {
+  const from = phase.start;
+  const to = phase.end || todayISO();
+  const startW = firstInRange(logs, bodyweightPred, from, to);
+  const endW = lastInRange(logs, bodyweightPred, from, to);
+  const lifts = ANCHOR_LIFTS.map((name) => {
+    const s = firstInRange(logs, exerciseMaxWeightPred(name), from, to);
+    const e = lastInRange(logs, exerciseMaxWeightPred(name), from, to);
+    return { name, start: s?.value ?? null, end: e?.value ?? null };
+  });
+  return {
+    weightStart: startW?.value ?? null,
+    weightEnd: endW?.value ?? null,
+    lifts,
+  };
+}
 
 function useDebouncedSave(value, key, ready) {
   const timer = useRef(null);
@@ -225,12 +280,24 @@ export default function App() {
     }));
   }
 
-  // history of a given exercise across all logged days, sorted ascending by date
-  function exerciseHistory(name) {
-    return Object.entries(logs)
-      .filter(([d, v]) => v?.exercises?.[name]?.sets?.length)
+  // Histórico por exercício, indexado uma vez por mudança em `logs` em vez de
+  // escanear todos os dias de novo pra cada exercício em cada render — o
+  // custo cresce com meses de uso, então vale memoizar.
+  const historyByExercise = useMemo(() => {
+    const map = {};
+    Object.entries(logs)
       .sort(([a], [b]) => (a < b ? -1 : 1))
-      .map(([d, v]) => ({ date: d, sets: v.exercises[name].sets }));
+      .forEach(([d, v]) => {
+        if (!v?.exercises) return;
+        Object.entries(v.exercises).forEach(([name, ex]) => {
+          if (!ex?.sets?.length) return;
+          (map[name] || (map[name] = [])).push({ date: d, sets: ex.sets });
+        });
+      });
+    return map;
+  }, [logs]);
+  function exerciseHistory(name) {
+    return historyByExercise[name] || [];
   }
 
   return (
@@ -616,8 +683,34 @@ function ExerciseCard({
   const lastTwoHitTop = hitTop(last) && hitTop(prev);
   const isSubstituted = substitution !== plan.n;
 
+  // Série "top" de uma sessão = maior peso (desempate por reps) — usada pra
+  // detectar estagnação: 3 sessões seguidas sem subir nem carga nem reps.
+  function topSet(entry) {
+    if (!entry?.sets?.length) return null;
+    return entry.sets.reduce((best, s) => {
+      const w = parseFloat(s.weight) || 0;
+      const r = parseInt(s.reps, 10) || 0;
+      if (w === 0) return best;
+      if (!best || w > best.w || (w === best.w && r > best.r)) return { w, r };
+      return best;
+    }, null);
+  }
+  const last3Tops = pastHistory.slice(-3).map(topSet);
+  const isStagnant =
+    last3Tops.length === 3 &&
+    last3Tops.every((t) => t && t.w > 0) &&
+    last3Tops[0].w === last3Tops[1].w &&
+    last3Tops[1].w === last3Tops[2].w &&
+    last3Tops[2].r <= last3Tops[0].r &&
+    last3Tops[2].r <= last3Tops[1].r;
+
   let suggestion = null;
-  if (last) {
+  if (isStagnant) {
+    suggestion = {
+      text: `Estagnado há 3 sessões em ${last3Tops[2].w}kg × ${last3Tops[2].r} — considera uma semana de deload (~40-50% da carga) antes de tentar progredir de novo`,
+      tone: "deload",
+    };
+  } else if (last) {
     suggestion = lastTwoHitTop
       ? { text: `Suba a carga (+2,5–5%) — bateu ${top} reps em todas as séries 2x seguidas`, tone: "up" }
       : { text: `Meta: adicionar 1 rep mantendo RIR ${plan.rir}`, tone: "hold" };
@@ -697,7 +790,7 @@ function ExerciseCard({
       ) : (
         suggestion && (
           <div className={"suggestion " + suggestion.tone}>
-            <Flame size={13} /> {suggestion.text}
+            {suggestion.tone === "deload" ? <TrendingDown size={13} /> : <Flame size={13} />} {suggestion.text}
           </div>
         )
       )}
@@ -1074,6 +1167,8 @@ function ProgressoTab({ logs, settings }) {
         </div>
       </div>
 
+      {(settings.phases || []).length > 0 && <PhaseComparisonCard logs={logs} phases={settings.phases} />}
+
       <ExerciseProgressCard logs={logs} />
 
       <div className="card">
@@ -1095,6 +1190,63 @@ function ProgressoTab({ logs, settings }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function PhaseComparisonCard({ logs, phases }) {
+  const sorted = [...phases].sort((a, b) => (a.start < b.start ? -1 : 1));
+  return (
+    <div className="card">
+      <div className="card-head">Comparação de fases</div>
+      {sorted.map((phase) => {
+        const stats = computePhaseStats(logs, phase);
+        const weightDelta =
+          stats.weightStart != null && stats.weightEnd != null ? stats.weightEnd - stats.weightStart : null;
+        const ongoing = !phase.end;
+        return (
+          <div className="phase-card" key={phase.id}>
+            <div className="phase-card-head">
+              <span className="phase-name">{phase.name}</span>
+              {ongoing && <span className="phase-ongoing-tag">em andamento</span>}
+            </div>
+            <div className="phase-stat-row">
+              <span className="muted">Peso corporal</span>
+              {stats.weightStart != null && stats.weightEnd != null ? (
+                <span className="mono">
+                  {stats.weightStart}kg → {stats.weightEnd}kg{" "}
+                  <span className={weightDelta <= 0 ? "tone-down" : "tone-up"}>
+                    ({weightDelta > 0 ? "+" : ""}
+                    {weightDelta.toFixed(1)}kg)
+                  </span>
+                </span>
+              ) : (
+                <span className="muted mono">sem dados suficientes</span>
+              )}
+            </div>
+            {stats.lifts.map((lift) => {
+              const liftDelta = lift.start != null && lift.end != null ? lift.end - lift.start : null;
+              const pct = liftDelta != null && lift.start > 0 ? Math.round((liftDelta / lift.start) * 100) : null;
+              return (
+                <div className="phase-stat-row" key={lift.name}>
+                  <span className="muted">{lift.name}</span>
+                  {liftDelta != null ? (
+                    <span className="mono">
+                      {lift.start}kg → {lift.end}kg{" "}
+                      <span className={liftDelta >= 0 ? "tone-down" : "tone-up"}>
+                        ({pct > 0 ? "+" : ""}
+                        {pct}%)
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="muted mono">sem dados suficientes</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1167,6 +1319,27 @@ function ExerciseProgressCard({ logs }) {
 // ---------------- Settings ----------------
 function SettingsSheet({ settings, setSettings, logs, onClose }) {
   const [local, setLocal] = useState(settings);
+  const [newPhase, setNewPhase] = useState({ name: "", start: "", end: "" });
+
+  function addPhase() {
+    if (!newPhase.name.trim() || !newPhase.start) return;
+    const phase = {
+      id: Date.now().toString(36),
+      name: newPhase.name.trim(),
+      start: newPhase.start,
+      end: newPhase.end || null,
+    };
+    setLocal((prev) => ({ ...prev, phases: [...(prev.phases || []), phase] }));
+    setNewPhase({ name: "", start: "", end: "" });
+  }
+  function removePhase(id) {
+    setLocal((prev) => ({ ...prev, phases: (prev.phases || []).filter((p) => p.id !== id) }));
+  }
+  function fmtPhaseDate(iso) {
+    const d = new Date(iso + "T12:00:00");
+    return `${d.getDate()}/${d.getMonth() + 1}/${String(d.getFullYear()).slice(2)}`;
+  }
+
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
@@ -1227,6 +1400,57 @@ function SettingsSheet({ settings, setSettings, logs, onClose }) {
               value={local.startWeight}
               onChange={(e) => setLocal({ ...local, startWeight: parseFloat(sanitizeDecimal(e.target.value)) || 0 })}
             />
+          </div>
+          <div className="card">
+            <div className="card-head">Fases (corte, manutenção, bulk...)</div>
+            {(local.phases || []).length === 0 && (
+              <p className="muted export-hint">
+                Marque o início (e o fim, quando acabar) de uma fase pra comparar peso perdido × força mantida depois, na aba Progresso.
+              </p>
+            )}
+            {(local.phases || []).map((p) => (
+              <div className="meal-row" key={p.id}>
+                <div className="favorite-info">
+                  <div className="meal-name">{p.name}</div>
+                  <div className="muted mono meal-macros">
+                    {fmtPhaseDate(p.start)} → {p.end ? fmtPhaseDate(p.end) : "em andamento"}
+                  </div>
+                </div>
+                <button className="icon-btn" onClick={() => removePhase(p.id)} aria-label="Remover fase">
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+            <input
+              className="input"
+              placeholder="Nome da fase (ex: Corte verão 2026)"
+              value={newPhase.name}
+              onChange={(e) => setNewPhase({ ...newPhase, name: e.target.value })}
+              style={{ marginTop: (local.phases || []).length ? 10 : 0 }}
+            />
+            <div className="phase-date-row">
+              <div>
+                <div className="hint phase-date-label">Início</div>
+                <input
+                  className="input mono"
+                  type="date"
+                  value={newPhase.start}
+                  onChange={(e) => setNewPhase({ ...newPhase, start: e.target.value })}
+                />
+              </div>
+              <div>
+                <div className="hint phase-date-label">Fim (opcional)</div>
+                <input
+                  className="input mono"
+                  type="date"
+                  value={newPhase.end}
+                  onChange={(e) => setNewPhase({ ...newPhase, end: e.target.value })}
+                />
+              </div>
+            </div>
+            <button className="btn-secondary" onClick={addPhase} disabled={!newPhase.name.trim() || !newPhase.start}>
+              <CalendarRange size={15} /> Adicionar fase
+            </button>
           </div>
           <div className="card">
             <div className="card-head">Exportar dados</div>
@@ -1315,6 +1539,8 @@ const CSS = `
 *{box-sizing:border-box;}
 html,body{margin:0;padding:0;background:var(--bg);}
 #root{min-height:100vh;}
+button,select,.input{transition:background-color .15s ease,border-color .15s ease,color .15s ease,opacity .15s ease,transform .1s ease,box-shadow .15s ease;}
+button:active:not(:disabled){transform:scale(0.96);}
 .app{
   font-family:'IBM Plex Sans',sans-serif;
   background:var(--bg);
@@ -1365,6 +1591,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
 
 .hero-card{
   background:var(--surface);border:1px solid;border-radius:14px;padding:20px;
+  box-shadow:0 4px 14px -6px rgba(0,0,0,0.35);
 }
 .hero-eyebrow{font-size:12px;font-weight:500;margin-bottom:4px;}
 .hero-title{font-family:'Fraunces',serif;font-size:30px;font-weight:650;line-height:1.1;}
@@ -1375,7 +1602,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
   cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
 }
 
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 2px 10px -6px rgba(0,0,0,0.3);}
 .chart-loading{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12.5px;}
 .card-head{font-size:13px;color:var(--muted);margin-bottom:12px;font-weight:500;}
 
@@ -1402,7 +1629,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
   background:var(--surface-2);border:1px solid var(--border);color:var(--text);
   border-radius:8px;padding:9px 11px;font-size:14px;width:100%;font-family:'IBM Plex Sans',sans-serif;
 }
-.input:focus{outline:none;border-color:var(--push);}
+.input:focus{outline:none;border-color:var(--push);box-shadow:0 0 0 3px rgba(198,144,46,0.15);}
 
 .section-title{font-family:'Fraunces',serif;font-size:16px;font-weight:650;margin-bottom:2px;}
 
@@ -1440,7 +1667,8 @@ html,body{margin:0;padding:0;background:var(--bg);}
 }
 .suggestion.up{background:rgba(198,144,46,0.15);color:var(--push);}
 .suggestion.hold{background:var(--surface-2);color:var(--muted);}
-.suggestion.pr{background:rgba(198,144,46,0.28);color:var(--push);border:1px solid rgba(198,144,46,0.5);font-weight:600;}
+.suggestion.pr{background:rgba(198,144,46,0.28);color:var(--push);border:1px solid rgba(198,144,46,0.5);font-weight:600;box-shadow:0 0 0 3px rgba(198,144,46,0.08);}
+.suggestion.deload{background:rgba(177,90,52,0.16);color:var(--legs);border:1px solid rgba(177,90,52,0.35);}
 
 .set-grid{margin-top:12px;}
 .set-grid-head, .set-grid-row{
@@ -1470,6 +1698,9 @@ html,body{margin:0;padding:0;background:var(--bg);}
   font-family:'IBM Plex Sans',sans-serif;margin-top:8px;
 }
 .export-hint{font-size:12px;margin-bottom:4px;}
+.phase-date-row{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
+.phase-date-row input{min-width:0;}
+.phase-date-label{margin-top:0;margin-bottom:4px;}
 
 .meal-row{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-top:1px solid var(--border);}
 .meal-row:first-of-type{border-top:none;}
@@ -1487,6 +1718,16 @@ html,body{margin:0;padding:0;background:var(--bg);}
 
 .tone-down{color:var(--pull);}
 .tone-up{color:var(--legs);}
+
+.phase-card{padding:12px 0;border-top:1px solid var(--border);}
+.phase-card:first-of-type{border-top:none;padding-top:0;}
+.phase-card-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+.phase-name{font-family:'Fraunces',serif;font-weight:650;font-size:14.5px;}
+.phase-ongoing-tag{
+  background:rgba(76,139,130,0.16);color:var(--pull);border:1px solid rgba(76,139,130,0.35);
+  border-radius:20px;padding:1px 8px;font-size:10px;font-family:'IBM Plex Sans',sans-serif;
+}
+.phase-stat-row{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;padding:4px 0;gap:10px;}
 
 .hist-row{display:grid;grid-template-columns:60px 60px 1fr auto;gap:8px;align-items:center;font-size:12.5px;padding:7px 0;border-top:1px solid var(--border);}
 .hist-row:first-of-type{border-top:none;}
