@@ -115,6 +115,11 @@ const computeFromFood = (food, g) => ({
   carb: (food.c * g) / 100,
   fat: (food.f * g) / 100,
 });
+// Teclado numérico do iPhone em pt-BR mostra vírgula como separador decimal,
+// mas <input type="number"> só aceita ponto e recusa a vírgula em silêncio
+// (a tecla parece não fazer nada). Por isso os campos de peso/quantidade usam
+// type="text" + inputMode="decimal" e passam por aqui pra normalizar.
+const sanitizeDecimal = (v) => v.replace(",", ".").replace(/[^0-9.]/g, "");
 
 function useDebouncedSave(value, key, ready) {
   const timer = useRef(null);
@@ -388,12 +393,12 @@ function BodyweightQuickLog({ dayEntry, updateDay, startWeight }) {
     <div className="bw-row">
       <input
         className="input mono"
-        type="number"
-        step="0.1"
+        type="text"
+        inputMode="decimal"
         placeholder={String(startWeight)}
         value={val}
         onChange={(e) => {
-          const v = e.target.value;
+          const v = sanitizeDecimal(e.target.value);
           setVal(v);
           updateDay({ bodyweight: v === "" ? null : parseFloat(v) });
         }}
@@ -528,10 +533,10 @@ function ExerciseCard({
     <div className="card exercise-card">
       <div className="ex-order-controls">
         <button className="order-btn" onClick={onMoveUp} disabled={!onMoveUp} aria-label="Mover pra cima">
-          <ChevronUp size={14} />
+          <ChevronUp size={17} />
         </button>
         <button className="order-btn" onClick={onMoveDown} disabled={!onMoveDown} aria-label="Mover pra baixo">
-          <ChevronDown size={14} />
+          <ChevronDown size={17} />
         </button>
       </div>
       <div className="ex-head">
@@ -594,12 +599,12 @@ function ExerciseCard({
             <span className="mono muted">{i + 1}</span>
             <input
               className="input mono set-input"
-              type="number"
+              type="text"
               inputMode="decimal"
               value={s.weight}
               onChange={(e) => {
                 const next = sets.slice();
-                next[i] = { ...next[i], weight: e.target.value };
+                next[i] = { ...next[i], weight: sanitizeDecimal(e.target.value) };
                 commit(next);
               }}
             />
@@ -712,10 +717,11 @@ function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
             </datalist>
             <input
               className="input mono"
-              type="number"
+              type="text"
+              inputMode="decimal"
               placeholder="Quantidade (g)"
               value={grams}
-              onChange={(e) => setGrams(e.target.value)}
+              onChange={(e) => setGrams(sanitizeDecimal(e.target.value))}
               style={{ marginTop: 8 }}
             />
             {previewMacros && (
@@ -742,24 +748,27 @@ function DietaTab({ dietCat, settings, dayEntry, updateDay }) {
             <div className="macro-inputs">
               <input
                 className="input mono"
-                type="number"
+                type="text"
+                inputMode="decimal"
                 placeholder="P (g)"
                 value={manualForm.protein}
-                onChange={(e) => setManualForm({ ...manualForm, protein: e.target.value })}
+                onChange={(e) => setManualForm({ ...manualForm, protein: sanitizeDecimal(e.target.value) })}
               />
               <input
                 className="input mono"
-                type="number"
+                type="text"
+                inputMode="decimal"
                 placeholder="C (g)"
                 value={manualForm.carb}
-                onChange={(e) => setManualForm({ ...manualForm, carb: e.target.value })}
+                onChange={(e) => setManualForm({ ...manualForm, carb: sanitizeDecimal(e.target.value) })}
               />
               <input
                 className="input mono"
-                type="number"
+                type="text"
+                inputMode="decimal"
                 placeholder="G (g)"
                 value={manualForm.fat}
-                onChange={(e) => setManualForm({ ...manualForm, fat: e.target.value })}
+                onChange={(e) => setManualForm({ ...manualForm, fat: sanitizeDecimal(e.target.value) })}
               />
             </div>
             <button className="btn-primary" onClick={addManualMeal}>
@@ -963,18 +972,20 @@ function SettingsSheet({ settings, setSettings, logs, onClose }) {
               <span>Dia de treino</span>
               <input
                 className="input mono settings-input"
-                type="number"
+                type="text"
+                inputMode="decimal"
                 value={local.fatTraining}
-                onChange={(e) => setLocal({ ...local, fatTraining: parseFloat(e.target.value) || 0 })}
+                onChange={(e) => setLocal({ ...local, fatTraining: parseFloat(sanitizeDecimal(e.target.value)) || 0 })}
               />
             </div>
             <div className="schedule-row">
               <span>Dia de descanso</span>
               <input
                 className="input mono settings-input"
-                type="number"
+                type="text"
+                inputMode="decimal"
                 value={local.fatRest}
-                onChange={(e) => setLocal({ ...local, fatRest: parseFloat(e.target.value) || 0 })}
+                onChange={(e) => setLocal({ ...local, fatRest: parseFloat(sanitizeDecimal(e.target.value)) || 0 })}
               />
             </div>
           </div>
@@ -982,9 +993,10 @@ function SettingsSheet({ settings, setSettings, logs, onClose }) {
             <div className="card-head">Peso inicial (kg)</div>
             <input
               className="input mono"
-              type="number"
+              type="text"
+              inputMode="decimal"
               value={local.startWeight}
-              onChange={(e) => setLocal({ ...local, startWeight: parseFloat(e.target.value) || 0 })}
+              onChange={(e) => setLocal({ ...local, startWeight: parseFloat(sanitizeDecimal(e.target.value)) || 0 })}
             />
           </div>
           <div className="card">
@@ -1083,7 +1095,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
   margin:0 auto;
   display:flex;
   flex-direction:column;
-  padding-bottom:76px;
+  padding-bottom:calc(76px + env(safe-area-inset-bottom));
 }
 @media (min-width:640px){
   html,body{background:#141110;}
@@ -1102,7 +1114,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
 
 .topbar{
   display:flex;align-items:center;justify-content:space-between;
-  padding:16px 18px 14px;
+  padding:max(16px, env(safe-area-inset-top)) 18px 14px;
   border-bottom:1px solid var(--border);
 }
 .brand{display:flex;align-items:center;gap:10px;}
@@ -1111,8 +1123,8 @@ html,body{margin:0;padding:0;background:var(--bg);}
 .brand-sub{font-size:11.5px;color:var(--muted);margin-top:1px;}
 .icon-btn{
   background:var(--surface-2);border:1px solid var(--border);color:var(--text);
-  width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;
-  cursor:pointer;
+  width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;flex-shrink:0;
 }
 
 .content{flex:1;padding:16px;}
@@ -1165,13 +1177,13 @@ html,body{margin:0;padding:0;background:var(--bg);}
 .section-title{font-family:'Fraunces',serif;font-size:16px;font-weight:650;margin-bottom:2px;}
 
 .exercise-card{padding:14px;position:relative;}
-.ex-order-controls{position:absolute;top:10px;right:10px;display:flex;flex-direction:column;gap:2px;}
+.ex-order-controls{position:absolute;top:8px;right:8px;display:flex;flex-direction:column;gap:4px;}
 .order-btn{
   background:var(--surface-2);border:1px solid var(--border);color:var(--muted);
-  width:20px;height:16px;border-radius:4px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;
+  width:32px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;
 }
 .order-btn:disabled{opacity:0.25;cursor:default;}
-.ex-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding-right:26px;}
+.ex-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding-right:38px;}
 .ex-name-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;}
 .swap-icon{color:var(--muted);flex-shrink:0;}
 .ex-name-select{
@@ -1198,10 +1210,10 @@ html,body{margin:0;padding:0;background:var(--bg);}
 
 .set-grid{margin-top:12px;}
 .set-grid-head, .set-grid-row{
-  display:grid;grid-template-columns:32px 1fr 1fr;gap:8px;align-items:center;margin-bottom:6px;
+  display:grid;grid-template-columns:32px 1fr 1fr;gap:8px;align-items:center;margin-bottom:8px;
 }
 .set-grid-head{font-size:11px;}
-.set-input{padding:7px 9px;text-align:center;}
+.set-input{padding:12px 9px;text-align:center;font-size:15px;}
 
 .macro-inputs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:10px 0;}
 .mode-toggle{display:flex;gap:6px;margin-bottom:12px;}
@@ -1243,11 +1255,11 @@ html,body{margin:0;padding:0;background:var(--bg);}
   position:fixed;bottom:0;left:50%;transform:translateX(-50%);
   width:100%;max-width:480px;
   background:var(--surface);border-top:1px solid var(--border);
-  display:flex;padding:8px 6px 12px;
+  display:flex;padding:8px 6px calc(12px + env(safe-area-inset-bottom));
 }
 .tab-btn{
   flex:1;background:none;border:none;color:var(--muted);display:flex;flex-direction:column;align-items:center;gap:3px;
-  font-size:10.5px;padding:6px 0;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+  font-size:10.5px;padding:8px 0;min-height:44px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
 }
 .tab-btn.active{color:var(--push);}
 
