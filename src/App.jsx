@@ -118,18 +118,49 @@ const computeFromFood = (food, g) => ({
 
 function useDebouncedSave(value, key, ready) {
   const timer = useRef(null);
+  const latest = useRef(value);
+  latest.current = value;
+
   useEffect(() => {
     if (!ready) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
+      timer.current = null;
       try {
-        await window.storage.set(key, JSON.stringify(value), false);
+        await window.storage.set(key, JSON.stringify(latest.current), false);
       } catch (e) {
         console.error("save failed", key, e);
       }
     }, 400);
     return () => clearTimeout(timer.current);
   }, [value, key, ready]);
+
+  // Salva na hora se o app for minimizado/fechado antes do debounce terminar —
+  // no iOS o Safari pode matar o PWA em background quase instantaneamente,
+  // então não dá pra confiar só no timer de 400ms.
+  useEffect(() => {
+    if (!ready) return;
+    const flush = () => {
+      if (timer.current) {
+        clearTimeout(timer.current);
+        timer.current = null;
+        window.storage.set(key, JSON.stringify(latest.current), false).catch((e) => {
+          console.error("flush save failed", key, e);
+        });
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) flush();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", flush);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", flush);
+      window.removeEventListener("beforeunload", flush);
+    };
+  }, [key, ready]);
 }
 
 export default function App() {
@@ -361,8 +392,11 @@ function BodyweightQuickLog({ dayEntry, updateDay, startWeight }) {
         step="0.1"
         placeholder={String(startWeight)}
         value={val}
-        onChange={(e) => setVal(e.target.value)}
-        onBlur={() => updateDay({ bodyweight: val === "" ? null : parseFloat(val) })}
+        onChange={(e) => {
+          const v = e.target.value;
+          setVal(v);
+          updateDay({ bodyweight: v === "" ? null : parseFloat(v) });
+        }}
       />
       <span className="muted">kg</span>
     </div>
