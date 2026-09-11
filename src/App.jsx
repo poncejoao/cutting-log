@@ -361,7 +361,12 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, dietCat, da
 
       <div className="card">
         <div className="card-head">Peso corporal</div>
-        <BodyweightQuickLog dayEntry={dayEntry} updateDay={updateDay} startWeight={settings.startWeight} />
+        <BodyweightQuickLog
+          dayEntry={dayEntry}
+          updateDay={updateDay}
+          startWeight={settings.startWeight}
+          selectedDate={selectedDate}
+        />
         <div className="hint">Sempre em jejum, ao acordar, antes de comer/beber — mantém o padrão pra comparação real.</div>
       </div>
     </div>
@@ -386,9 +391,16 @@ function MacroBar({ label, got, target, color, unit }) {
   );
 }
 
-function BodyweightQuickLog({ dayEntry, updateDay, startWeight }) {
+function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate }) {
   const [val, setVal] = useState(dayEntry.bodyweight ?? "");
-  useEffect(() => setVal(dayEntry.bodyweight ?? ""), [dayEntry.bodyweight]);
+  // Só recarrega o campo quando o DIA muda — se ficasse de olho em
+  // dayEntry.bodyweight, cada tecla digitada reescreveria o valor já
+  // arredondado (parseFloat) de volta no campo e apagaria o "." de quem
+  // está no meio de digitar "82.5", por exemplo.
+  useEffect(() => {
+    setVal(dayEntry.bodyweight ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate]);
   return (
     <div className="bw-row">
       <input
@@ -471,6 +483,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             key={ex.id}
             plan={ex}
             effectiveName={key}
+            selectedDate={selectedDate}
             logged={logged[key]?.sets}
             history={exerciseHistory(key)}
             onChange={(sets) => setExerciseSets(key, sets)}
@@ -490,6 +503,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
 function ExerciseCard({
   plan,
   effectiveName,
+  selectedDate,
   logged,
   history,
   onChange,
@@ -503,9 +517,14 @@ function ExerciseCard({
   const top = topRep(plan.reps);
   const [sets, setSets] = useState(logged || Array.from({ length: plan.sets }, () => ({ weight: "", reps: "" })));
 
+  // Re-sincroniza só quando o dia ou o exercício mudam de verdade — não a cada
+  // tecla. Ao salvar, as séries vazias são filtradas antes de ir pro storage
+  // (pra não guardar lixo), mas esse array "enxuto" não pode voltar e resetar
+  // as séries que o usuário ainda está preenchendo na tela.
   useEffect(() => {
     setSets(logged || Array.from({ length: plan.sets }, () => ({ weight: "", reps: "" })));
-  }, [logged, plan.sets]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, effectiveName, plan.sets]);
 
   function commit(next) {
     setSets(next);
