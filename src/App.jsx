@@ -18,8 +18,8 @@ const DEFAULT_SCHEDULE = { 0: "Descanso", 1: "Push", 2: "Pull", 3: "Legs", 4: "P
 
 const PLAN = {
   Push: [
-    { id: "supino-reto", n: "Supino reto", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], equivalents: ["Supino máquina (peck deck press)", "Crucifixo reto halteres"] },
-    { id: "supino-inclinado", n: "Supino inclinado halteres", sets: 3, reps: "8-10", rir: "1-2", variations: ["Halteres", "Barra", "Máquina", "Smith"], equivalents: ["Supino inclinado barra", "Supino inclinado máquina", "Crucifixo inclinado halteres"] },
+    { id: "supino-reto", n: "Supino reto", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino máquina (peck deck press)", "Crucifixo reto halteres"] },
+    { id: "supino-inclinado", n: "Supino inclinado halteres", sets: 3, reps: "8-10", rir: "1-2", variations: ["Halteres", "Barra", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino inclinado barra", "Supino inclinado máquina", "Crucifixo inclinado halteres"] },
     { id: "desenvolvimento", n: "Desenvolvimento militar", sets: 3, reps: "8-10", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], equivalents: ["Desenvolvimento Arnold", "Desenvolvimento máquina"] },
     { id: "elevacao-lateral", n: "Elevação lateral", sets: 3, reps: "12-15", rir: "0-1", variations: ["Halteres", "Polia", "Máquina"], equivalents: ["Elevação lateral polia unilateral", "Elevação lateral máquina"] },
     { id: "triceps-pulley", n: "Tríceps pulley", sets: 3, reps: "10-12", rir: "0-1", variations: ["Barra reta", "Barra V", "Corda", "Puxador unilateral"], equivalents: ["Tríceps testa (skull crusher)", "Mergulho no banco (bench dip)"] },
@@ -30,7 +30,7 @@ const PLAN = {
     { id: "puxada-aberta", n: "Puxada aberta", sets: 3, reps: "8-10", rir: "1", variations: ["Pegada aberta", "Pegada supinada", "Pegada neutra", "Máquina"], equivalents: ["Barra fixa (pull-up)", "Puxada triângulo"] },
     { id: "remada-baixa", n: "Remada baixa", sets: 3, reps: "8-10", rir: "1", variations: ["Triângulo", "Barra reta", "Pegada aberta"], equivalents: ["Remada unilateral halter (serrote)", "Remada máquina peck deck invertido"] },
     { id: "face-pull", n: "Face pull", sets: 3, reps: "12-15", rir: "0-1", variations: ["Corda", "Barra reta"], equivalents: ["Crucifixo invertido máquina", "Crucifixo invertido halteres"] },
-    { id: "rosca-direta", n: "Rosca direta", sets: 3, reps: "8-10", rir: "1", variations: ["Barra reta", "Barra W", "Halteres"], equivalents: ["Rosca Scott", "Rosca concentrada"] },
+    { id: "rosca-direta", n: "Rosca direta", sets: 3, reps: "8-10", rir: "1", variations: ["Barra reta", "Barra W", "Halteres"], grips: ["Supinada", "Neutra", "Pronada"], equivalents: ["Rosca Scott", "Rosca concentrada"] },
     { id: "rosca-martelo", n: "Rosca martelo", sets: 2, reps: "10-12", rir: "0-1", variations: ["Halteres", "Corda (polia)"], equivalents: ["Rosca alternada halteres", "Rosca corda polia"] },
     { id: "lombar-maquina", n: "Lombar máquina", sets: 2, reps: "10-15", rir: "1-2", variations: ["Máquina", "Extensão lombar 45°"], equivalents: ["Extensão lombar solo (superman)", "Good morning leve"] },
   ],
@@ -104,6 +104,7 @@ const DEFAULT_SETTINGS = {
   exerciseVariations: {},
   exerciseSubstitutions: {},
   exerciseOrder: {},
+  exerciseGrips: {},
   favoriteMeals: [],
 };
 
@@ -488,6 +489,13 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
     }));
   }
 
+  function setGrip(id, grip) {
+    setSettings((prev) => ({
+      ...prev,
+      exerciseGrips: { ...prev.exerciseGrips, [id]: grip },
+    }));
+  }
+
   function setSubstitution(id, name) {
     setSettings((prev) => ({
       ...prev,
@@ -522,6 +530,8 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             onChange={(sets) => setExerciseSets(key, sets)}
             variation={settings.exerciseVariations[ex.id] || ex.variations[0]}
             onVariationChange={(v) => setVariation(ex.id, v)}
+            grip={settings.exerciseGrips[ex.id] || ex.grips?.[0]}
+            onGripChange={(g) => setGrip(ex.id, g)}
             substitution={settings.exerciseSubstitutions[ex.id] || ex.n}
             onSubstitutionChange={(v) => setSubstitution(ex.id, v)}
             onMoveUp={i > 0 ? () => moveExercise(ex.id, -1) : null}
@@ -559,6 +569,8 @@ function ExerciseCard({
   onChange,
   variation,
   onVariationChange,
+  grip,
+  onGripChange,
   substitution,
   onSubstitutionChange,
   onMoveUp,
@@ -642,6 +654,15 @@ function ExerciseCard({
                 {plan.variations.map((v) => (
                   <option key={v} value={v}>
                     {v}
+                  </option>
+                ))}
+              </select>
+            )}
+            {!isSubstituted && plan.grips && (
+              <select className="variation-chip grip-chip" value={grip} onChange={(e) => onGripChange(e.target.value)}>
+                {plan.grips.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
                   </option>
                 ))}
               </select>
@@ -1391,6 +1412,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
   border-radius:20px;padding:2px 8px;font-size:10.5px;font-family:'IBM Plex Sans',sans-serif;
   cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;
 }
+.grip-chip{color:var(--pull);}
 .ex-meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
 .sub-note{color:var(--legs);}
 .ex-last-badge{
