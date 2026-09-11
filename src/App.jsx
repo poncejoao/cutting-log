@@ -134,6 +134,16 @@ function useDebouncedSave(value, key, ready) {
   const latest = useRef(value);
   latest.current = value;
 
+  // Grava agora mesmo, cancelando o debounce pendente. Usado tanto pelo
+  // salvamento automático (minimizar/fechar) quanto pelo botão "Salvar agora".
+  async function writeNow() {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    await window.storage.set(key, JSON.stringify(latest.current), false);
+  }
+
   useEffect(() => {
     if (!ready) return;
     if (timer.current) clearTimeout(timer.current);
@@ -154,13 +164,7 @@ function useDebouncedSave(value, key, ready) {
   useEffect(() => {
     if (!ready) return;
     const flush = () => {
-      if (timer.current) {
-        clearTimeout(timer.current);
-        timer.current = null;
-        window.storage.set(key, JSON.stringify(latest.current), false).catch((e) => {
-          console.error("flush save failed", key, e);
-        });
-      }
+      if (timer.current) writeNow().catch((e) => console.error("flush save failed", key, e));
     };
     const onVisibility = () => {
       if (document.hidden) flush();
@@ -173,7 +177,10 @@ function useDebouncedSave(value, key, ready) {
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("beforeunload", flush);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, ready]);
+
+  return writeNow;
 }
 
 export default function App() {
@@ -198,8 +205,11 @@ export default function App() {
     })();
   }, []);
 
-  useDebouncedSave(logs, "logs", ready);
-  useDebouncedSave(settings, "settings", ready);
+  const saveLogsNow = useDebouncedSave(logs, "logs", ready);
+  const saveSettingsNow = useDebouncedSave(settings, "settings", ready);
+  async function saveNow() {
+    await Promise.all([saveLogsNow(), saveSettingsNow()]);
+  }
 
   const dow = new Date(selectedDate + "T12:00:00").getDay();
   const dayType = settings.schedule[dow] || "Descanso";
@@ -259,6 +269,7 @@ export default function App() {
             selectedDate={selectedDate}
             settings={settings}
             setSettings={setSettings}
+            onSaveNow={saveNow}
           />
         )}
         {tab === "dieta" && (
@@ -429,7 +440,20 @@ function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate }) 
 }
 
 // ---------------- Treino ----------------
-function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate, settings, setSettings }) {
+function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate, settings, setSettings, onSaveNow }) {
+  const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
+  async function handleSaveNow() {
+    setSaveState("saving");
+    try {
+      await onSaveNow();
+      setSaveState("saved");
+      setTimeout(() => setSaveState("idle"), 1800);
+    } catch (e) {
+      console.error("manual save failed", e);
+      setSaveState("idle");
+    }
+  }
+
   if (!isTrainingDay(dayType)) {
     return (
       <div className="stack">
@@ -504,6 +528,23 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
           />
         );
       })}
+      <button
+        className={"btn-primary" + (saveState === "saved" ? " btn-saved" : "")}
+        onClick={handleSaveNow}
+        disabled={saveState === "saving"}
+      >
+        {saveState === "saved" ? (
+          <>
+            <Check size={16} /> Salvo
+          </>
+        ) : saveState === "saving" ? (
+          "Salvando…"
+        ) : (
+          <>
+            <Check size={16} /> Salvar agora
+          </>
+        )}
+      </button>
     </div>
   );
 }
@@ -1253,6 +1294,7 @@ html,body{margin:0;padding:0;background:var(--bg);}
   cursor:pointer;font-family:'IBM Plex Sans',sans-serif;margin-top:10px;
 }
 .btn-primary:disabled{opacity:0.4;cursor:default;}
+.btn-primary.btn-saved{background:var(--pull);color:#1E1A16;}
 .btn-secondary{
   width:100%;background:var(--surface-2);color:var(--text);border:1px solid var(--border);border-radius:9px;padding:10px;
   font-size:13px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;
