@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2 } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
@@ -135,6 +135,9 @@ const DEFAULT_SETTINGS = {
   exerciseGrips: {},
   favoriteMeals: [],
   phases: [],
+  theme: "dark",
+  goalWeight: null,
+  goalDate: null,
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -266,6 +269,54 @@ function computeDateCompare(logs, dateA, dateB) {
   return { weightA: wA?.value ?? null, weightB: wB?.value ?? null, lifts };
 }
 
+// Ritmo atual = variação de peso nos últimos 14 dias, projetada por semana.
+// Ritmo necessário = quanto falta até a meta, dividido pelas semanas que
+// restam até a data alvo. Compara os dois pra dizer se o prazo é realista.
+function computeGoalStatus(logs, goalWeight, goalDate) {
+  if (!goalWeight || !goalDate) return null;
+  const entries = Object.entries(logs)
+    .filter(([, v]) => v.bodyweight != null)
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  if (!entries.length) return null;
+  const [lastDate, lastVal] = entries[entries.length - 1];
+  const currentWeight = lastVal.bodyweight;
+
+  const cutoff = new Date(lastDate + "T12:00:00");
+  cutoff.setDate(cutoff.getDate() - 14);
+  const cutoffISO = todayISO(cutoff);
+  const recent = entries.filter(([d]) => d >= cutoffISO);
+  let weeklyRate = null;
+  if (recent.length >= 2) {
+    const [firstDate, firstVal] = recent[0];
+    const daysSpan = (new Date(lastDate) - new Date(firstDate)) / 86400000;
+    if (daysSpan > 0) weeklyRate = ((currentWeight - firstVal.bodyweight) / daysSpan) * 7;
+  }
+
+  const daysLeft = Math.ceil((new Date(goalDate) - new Date(lastDate + "T12:00:00")) / 86400000);
+  const weeksLeft = daysLeft / 7;
+  const neededTotal = goalWeight - currentWeight;
+  const neededWeeklyRate = weeksLeft > 0 ? neededTotal / weeksLeft : null;
+
+  let verdict = "sem_dados";
+  if (daysLeft <= 0) {
+    verdict = Math.abs(neededTotal) < 0.3 ? "batido" : "prazo_passou";
+  } else if (weeklyRate == null || neededWeeklyRate == null) {
+    verdict = "sem_dados";
+  } else if (Math.abs(neededTotal) < 0.3) {
+    verdict = "batido";
+  } else if (Math.sign(weeklyRate) !== Math.sign(neededWeeklyRate) && Math.abs(neededWeeklyRate) > 0.05) {
+    verdict = "direcao_errada";
+  } else if (Math.abs(weeklyRate) >= Math.abs(neededWeeklyRate) * 0.85) {
+    verdict = "no_ritmo";
+  } else if (Math.abs(weeklyRate) >= Math.abs(neededWeeklyRate) * 0.4) {
+    verdict = "lento";
+  } else {
+    verdict = "muito_lento";
+  }
+
+  return { currentWeight, goalWeight, daysLeft, weeklyRate, neededWeeklyRate, verdict };
+}
+
 function useDebouncedSave(value, key, ready) {
   const timer = useRef(null);
   const latest = useRef(value);
@@ -330,6 +381,10 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [cloudStatus, setCloudStatus] = useState("idle"); // idle | syncing | synced | error
   const [recoveryMode, setRecoveryMode] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState(() => {
+    const raw = localStorage.getItem("cutting-log:lastCloudSync");
+    return raw ? Number(raw) : null;
+  });
   const pulledFromCloud = useRef(false);
 
   useEffect(() => {
@@ -394,7 +449,13 @@ export default function App() {
         .from("backups")
         .upsert({ user_id: session.user.id, logs, settings, updated_at: new Date().toISOString() });
       setCloudStatus(error ? "error" : "synced");
-      if (error) console.error("cloud push failed", error);
+      if (error) {
+        console.error("cloud push failed", error);
+      } else {
+        const now = Date.now();
+        localStorage.setItem("cutting-log:lastCloudSync", String(now));
+        setLastSyncAt(now);
+      }
     }, 1200);
     return () => clearTimeout(timer);
   }, [logs, settings, session, ready]);
@@ -404,6 +465,14 @@ export default function App() {
   async function saveNow() {
     await Promise.all([saveLogsNow(), saveSettingsNow()]);
   }
+
+  // O toggle vai no <html>, não só na div do app — assim o fundo por trás
+  // do card (mobile: as bordas/status bar; desktop: o "tapete" atrás do
+  // card) também troca de cor junto, sem sobrar tarja escura ao redor de
+  // um app claro.
+  useEffect(() => {
+    document.documentElement.classList.toggle("theme-light", settings.theme === "light");
+  }, [settings.theme]);
 
   const dow = new Date(selectedDate + "T12:00:00").getDay();
   const dayEntry = logs[selectedDate] || {};
@@ -528,6 +597,7 @@ export default function App() {
           onCleanEmptyDays={cleanEmptyDays}
           session={session}
           cloudStatus={cloudStatus}
+          lastSyncAt={lastSyncAt}
           recoveryMode={recoveryMode}
           onRecoveryDone={() => setRecoveryMode(false)}
           onClose={() => setShowSettings(false)}
@@ -565,6 +635,7 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
   const isToday = selectedDate === todayISO();
   const hour = new Date().getHours();
   const showWeightReminder = isToday && dayEntry.bodyweight == null && hour >= 9;
+  const showTrainingReminder = isToday && training && hour >= 12 && exercisesDone === 0;
 
   return (
     <div className="stack">
@@ -572,6 +643,12 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
         <div className="reminder-banner">
           <Flame size={14} />
           <span>Ainda não registrou o peso de hoje — pesa em jejum antes de comer/beber algo.</span>
+        </div>
+      )}
+      {showTrainingReminder && (
+        <div className="reminder-banner">
+          <Dumbbell size={14} />
+          <span>Já passou do meio-dia e o treino de {dayType} de hoje ainda não foi registrado.</span>
         </div>
       )}
       <div className="date-row">
@@ -919,6 +996,18 @@ function ExerciseCard({
   const lastTwoHitTop = hitTop(last) && hitTop(prev);
   const isSubstituted = substitution !== plan.n;
 
+  // Preenche só as séries ainda vazias com o peso/reps da última sessão —
+  // nunca sobrescreve o que você já digitou hoje.
+  function repeatLastSession() {
+    if (!last) return;
+    const next = sets.map((s, i) => {
+      if (s.weight !== "" || s.reps !== "") return s;
+      const prevSet = last.sets[i];
+      return prevSet ? { weight: prevSet.weight, reps: prevSet.reps } : s;
+    });
+    commit(next);
+  }
+
   // Série "top" de uma sessão = maior peso (desempate por reps) — usada pra
   // detectar estagnação: 3 sessões seguidas sem subir nem carga nem reps.
   function topSet(entry) {
@@ -1012,9 +1101,14 @@ function ExerciseCard({
           </div>
         </div>
         {last && (
-          <div className="ex-last-badge mono">
-            <span className="muted-sm">últ.</span>
-            {last.sets.map((s) => `${s.weight || "—"}×${s.reps || "—"}`).join(" / ")}
+          <div className="ex-last-col">
+            <div className="ex-last-badge mono">
+              <span className="muted-sm">últ.</span>
+              {last.sets.map((s) => `${s.weight || "—"}×${s.reps || "—"}`).join(" / ")}
+            </div>
+            <button className="repeat-last-btn" onClick={repeatLastSession}>
+              <Repeat size={11} /> Repetir
+            </button>
           </div>
         )}
       </div>
@@ -1383,15 +1477,28 @@ function ProgressoTab({ logs, settings }) {
   const currentWeight = bwData.length ? bwData[bwData.length - 1].peso : settings.startWeight;
   const delta = (currentWeight - settings.startWeight).toFixed(1);
   const strengthData = useMemo(() => computeStrengthIndex(logs), [logs]);
+  const goalStatus = useMemo(
+    () => computeGoalStatus(logs, settings.goalWeight, settings.goalDate),
+    [logs, settings.goalWeight, settings.goalDate]
+  );
+  const bwChartRef = useRef(null);
+  const strengthChartRef = useRef(null);
 
   return (
     <div className="stack">
+      {goalStatus && <GoalStatusCard status={goalStatus} />}
+
       <div className="card">
         <div className="card-head">Peso corporal</div>
         {bwData.length >= 2 ? (
-          <Suspense fallback={<ChartFallback height={180} />}>
-            <MiniLineChart data={bwData} dataKey="peso" yDomain={["dataMin - 1", "dataMax + 1"]} height={180} valueSuffix="kg" />
-          </Suspense>
+          <>
+            <div ref={bwChartRef}>
+              <Suspense fallback={<ChartFallback height={180} />}>
+                <MiniLineChart data={bwData} dataKey="peso" yDomain={["dataMin - 1", "dataMax + 1"]} height={180} valueSuffix="kg" />
+              </Suspense>
+            </div>
+            <ShareChartButton containerRef={bwChartRef} filename="peso-corporal.png" />
+          </>
         ) : (
           <p className="muted">Registre o peso por alguns dias na aba Hoje pra ver o gráfico.</p>
         )}
@@ -1407,15 +1514,20 @@ function ProgressoTab({ logs, settings }) {
       <div className="card">
         <div className="card-head">Força geral</div>
         {strengthData.length >= 2 ? (
-          <Suspense fallback={<ChartFallback height={170} />}>
-            <MiniLineChart
-              data={strengthData}
-              dataKey="indice"
-              yDomain={["dataMin - 5", "dataMax + 5"]}
-              height={170}
-              valueSuffix="%"
-            />
-          </Suspense>
+          <>
+            <div ref={strengthChartRef}>
+              <Suspense fallback={<ChartFallback height={170} />}>
+                <MiniLineChart
+                  data={strengthData}
+                  dataKey="indice"
+                  yDomain={["dataMin - 5", "dataMax + 5"]}
+                  height={170}
+                  valueSuffix="%"
+                />
+              </Suspense>
+            </div>
+            <ShareChartButton containerRef={strengthChartRef} filename="forca-geral.png" />
+          </>
         ) : (
           <p className="muted">
             Registre {ANCHOR_LIFTS.join(", ")} por mais sessões pra ver a média de evolução dos 3.
@@ -1459,6 +1571,54 @@ function ProgressoTab({ logs, settings }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+const GOAL_VERDICT = {
+  batido: { text: "🎉 Meta batida!", tone: "good" },
+  no_ritmo: { text: "No ritmo certo pra bater a meta no prazo.", tone: "good" },
+  lento: { text: "Ritmo um pouco devagar — talvez não dê tempo no prazo atual.", tone: "warn" },
+  muito_lento: { text: "Ritmo bem abaixo do necessário — dificilmente bate nesse prazo.", tone: "warn" },
+  direcao_errada: { text: "O peso está indo na direção contrária da meta.", tone: "warn" },
+  prazo_passou: { text: "O prazo já passou e a meta ainda não foi batida.", tone: "warn" },
+  sem_dados: { text: "Registre o peso por mais dias pra calcular o ritmo.", tone: "neutral" },
+};
+
+function GoalStatusCard({ status }) {
+  const v = GOAL_VERDICT[status.verdict];
+  return (
+    <div className="card">
+      <div className="card-head">Meta de peso</div>
+      <div className="phase-stat-row">
+        <span className="muted">Atual → alvo</span>
+        <span className="mono">
+          {status.currentWeight}kg → {status.goalWeight}kg
+        </span>
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Prazo</span>
+        <span className="mono">{status.daysLeft > 0 ? `${status.daysLeft} dias restantes` : "prazo encerrado"}</span>
+      </div>
+      {status.weeklyRate != null && (
+        <div className="phase-stat-row">
+          <span className="muted">Ritmo atual</span>
+          <span className="mono">
+            {status.weeklyRate > 0 ? "+" : ""}
+            {status.weeklyRate.toFixed(2)}kg/semana
+          </span>
+        </div>
+      )}
+      {status.neededWeeklyRate != null && status.daysLeft > 0 && (
+        <div className="phase-stat-row">
+          <span className="muted">Ritmo necessário</span>
+          <span className="mono">
+            {status.neededWeeklyRate > 0 ? "+" : ""}
+            {status.neededWeeklyRate.toFixed(2)}kg/semana
+          </span>
+        </div>
+      )}
+      <div className={"goal-verdict " + v.tone}>{v.text}</div>
     </div>
   );
 }
@@ -1589,6 +1749,7 @@ const ALL_EXERCISES = [...PLAN.Push, ...PLAN.Pull, ...PLAN.Legs].map((e) => e.n)
 
 function ExerciseProgressCard({ logs }) {
   const [selected, setSelected] = useState(ALL_EXERCISES[0]);
+  const chartRef = useRef(null);
 
   const data = useMemo(() => {
     return Object.entries(logs)
@@ -1628,19 +1789,24 @@ function ExerciseProgressCard({ logs }) {
       </select>
 
       {data.length >= 2 ? (
-        <Suspense fallback={<ChartFallback height={170} />}>
-          <MiniLineChart
-            data={data}
-            dataKey="carga"
-            yDomain={["dataMin - 2", "dataMax + 2"]}
-            height={170}
-            wrapperStyle={{ marginTop: 12 }}
-            tooltipFormatter={(value, name) => [
-              name === "carga" ? `${value}kg` : `${value} reps`,
-              name === "carga" ? "Carga máx." : "Reps (série top)",
-            ]}
-          />
-        </Suspense>
+        <>
+          <div ref={chartRef}>
+            <Suspense fallback={<ChartFallback height={170} />}>
+              <MiniLineChart
+                data={data}
+                dataKey="carga"
+                yDomain={["dataMin - 2", "dataMax + 2"]}
+                height={170}
+                wrapperStyle={{ marginTop: 12 }}
+                tooltipFormatter={(value, name) => [
+                  name === "carga" ? `${value}kg` : `${value} reps`,
+                  name === "carga" ? "Carga máx." : "Reps (série top)",
+                ]}
+              />
+            </Suspense>
+          </div>
+          <ShareChartButton containerRef={chartRef} filename={`${selected}.png`} />
+        </>
       ) : (
         <p className="muted" style={{ marginTop: 12 }}>
           Registre esse exercício em pelo menos 2 sessões pra ver a evolução.
@@ -1651,7 +1817,7 @@ function ExerciseProgressCard({ logs }) {
 }
 
 // ---------------- Settings ----------------
-function CloudBackupCard({ session, cloudStatus, recoveryMode, onRecoveryDone }) {
+function CloudBackupCard({ session, cloudStatus, lastSyncAt, recoveryMode, onRecoveryDone }) {
   const [mode, setMode] = useState("signup"); // signup | login
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -1756,6 +1922,8 @@ function CloudBackupCard({ session, cloudStatus, recoveryMode, onRecoveryDone })
   }
 
   if (session) {
+    const daysSinceSync = lastSyncAt != null ? Math.floor((Date.now() - lastSyncAt) / 86400000) : null;
+    const syncStale = daysSinceSync != null && daysSinceSync >= 2;
     return (
       <div className="card">
         <div className="card-head">Backup na nuvem</div>
@@ -1763,6 +1931,14 @@ function CloudBackupCard({ session, cloudStatus, recoveryMode, onRecoveryDone })
           Sincronizado com <strong className="cloud-email">{session.user.email}</strong> ·{" "}
           {cloudStatus === "syncing" ? "salvando…" : cloudStatus === "error" ? "erro ao sincronizar" : "tudo em dia"}
         </p>
+        {daysSinceSync != null && (
+          <p className={syncStale ? "sync-age-warn" : "muted export-hint"}>
+            {daysSinceSync === 0
+              ? "Última sincronização: hoje"
+              : `Última sincronização: há ${daysSinceSync} dia${daysSinceSync > 1 ? "s" : ""}`}
+            {syncStale && " — confere se o celular teve internet ultimamente"}
+          </p>
+        )}
         <button className="btn-secondary" onClick={handleLogout}>
           <LogOut size={15} /> Sair dessa conta
         </button>
@@ -1831,6 +2007,7 @@ function SettingsSheet({
   onCleanEmptyDays,
   session,
   cloudStatus,
+  lastSyncAt,
   recoveryMode,
   onRecoveryDone,
   onClose,
@@ -1886,6 +2063,23 @@ function SettingsSheet({
         </div>
         <div className="stack">
           <div className="card">
+            <div className="card-head">Aparência</div>
+            <div className="mode-toggle">
+              <button
+                className={local.theme !== "light" ? "mode-btn active" : "mode-btn"}
+                onClick={() => setLocal({ ...local, theme: "dark" })}
+              >
+                Escuro
+              </button>
+              <button
+                className={local.theme === "light" ? "mode-btn active" : "mode-btn"}
+                onClick={() => setLocal({ ...local, theme: "light" })}
+              >
+                Claro
+              </button>
+            </div>
+          </div>
+          <div className="card">
             <div className="card-head">Divisão semanal</div>
             {WEEKDAY_LABEL.map((label, i) => (
               <div className="schedule-row" key={i}>
@@ -1937,6 +2131,32 @@ function SettingsSheet({
               value={local.startWeight}
               onChange={(e) => setLocal({ ...local, startWeight: parseFloat(sanitizeDecimal(e.target.value)) || 0 })}
             />
+          </div>
+          <div className="card">
+            <div className="card-head">Meta de peso final</div>
+            <p className="muted export-hint">Define até quando e quanto — o app mostra se o ritmo atual bate com o prazo.</p>
+            <div className="phase-date-row">
+              <div>
+                <div className="hint phase-date-label">Peso alvo (kg)</div>
+                <input
+                  className="input mono"
+                  type="text"
+                  inputMode="decimal"
+                  placeholder="ex: 68"
+                  value={local.goalWeight ?? ""}
+                  onChange={(e) => setLocal({ ...local, goalWeight: parseFloat(sanitizeDecimal(e.target.value)) || null })}
+                />
+              </div>
+              <div>
+                <div className="hint phase-date-label">Data alvo</div>
+                <input
+                  className="input mono"
+                  type="date"
+                  value={local.goalDate || ""}
+                  onChange={(e) => setLocal({ ...local, goalDate: e.target.value || null })}
+                />
+              </div>
+            </div>
           </div>
           <div className="card">
             <div className="card-head">Fases (corte, manutenção, bulk...)</div>
@@ -1992,6 +2212,7 @@ function SettingsSheet({
           <CloudBackupCard
             session={session}
             cloudStatus={cloudStatus}
+            lastSyncAt={lastSyncAt}
             recoveryMode={recoveryMode}
             onRecoveryDone={onRecoveryDone}
           />
@@ -2044,6 +2265,91 @@ function SettingsSheet({
         </div>
       </div>
     </div>
+  );
+}
+
+// Serializa o <svg> do gráfico, troca os var(--cor) pelo valor real (uma
+// imagem isolada não tem acesso às variáveis CSS da página), desenha num
+// canvas com o fundo do app por trás (o SVG em si é transparente) e devolve
+// um PNG — pronto pra compartilhar ou baixar.
+async function chartSvgToPngBlob(containerEl) {
+  const svg = containerEl?.querySelector("svg");
+  if (!svg) return null;
+  const clone = svg.cloneNode(true);
+  const root = getComputedStyle(document.documentElement);
+  const bg = root.getPropertyValue("--surface").trim() || "#28221D";
+  let svgString = new XMLSerializer().serializeToString(clone);
+  ["--bg", "--surface", "--surface-2", "--border", "--text", "--muted", "--push", "--pull", "--legs", "--upper", "--lower"].forEach(
+    (name) => {
+      const val = root.getPropertyValue(name).trim();
+      if (val) svgString = svgString.split(`var(${name})`).join(val);
+    }
+  );
+  const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(svgBlob);
+  try {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = url;
+    });
+    const scale = 2;
+    const w = svg.viewBox?.baseVal?.width || svg.clientWidth || img.width;
+    const h = svg.viewBox?.baseVal?.height || svg.clientHeight || img.height;
+    const canvas = document.createElement("canvas");
+    canvas.width = w * scale;
+    canvas.height = h * scale;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.scale(scale, scale);
+    ctx.drawImage(img, 0, 0, w, h);
+    return await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function shareOrDownloadChart(containerEl, filename) {
+  const blob = await chartSvgToPngBlob(containerEl);
+  if (!blob) return;
+  const file = new File([blob], filename, { type: "image/png" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: "Cutting Log" });
+    } catch (e) {
+      // usuário cancelou o compartilhamento — não é erro
+    }
+  } else {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+}
+
+function ShareChartButton({ containerRef, filename }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      className="share-chart-btn"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await shareOrDownloadChart(containerRef.current, filename);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <Share2 size={13} /> {busy ? "Gerando…" : "Compartilhar gráfico"}
+    </button>
   );
 }
 
@@ -2104,6 +2410,20 @@ const CSS = `
   --legs:#B15A34;
   --upper:#5B7A99;
   --lower:#8B6F9E;
+  --desktop-bg:#141110;
+  --card-shadow:rgba(0,0,0,0.3);
+  --card-shadow-lg:rgba(0,0,0,0.35);
+}
+:root.theme-light{
+  --bg:#FBF6EE;
+  --surface:#FFFFFF;
+  --surface-2:#F1E9DC;
+  --border:#E2D5C2;
+  --text:#2A2318;
+  --muted:#8A7F6E;
+  --desktop-bg:#E8E0D2;
+  --card-shadow:rgba(120,100,70,0.15);
+  --card-shadow-lg:rgba(120,100,70,0.2);
 }
 
 *{box-sizing:border-box;}
@@ -2123,7 +2443,7 @@ button:active:not(:disabled){transform:scale(0.96);}
   padding-bottom:calc(76px + env(safe-area-inset-bottom));
 }
 @media (min-width:640px){
-  html,body{background:#141110;}
+  html,body{background:var(--desktop-bg);}
   #root{display:flex;justify-content:center;min-height:100vh;}
   .app{
     min-height:calc(100vh - 48px);
@@ -2166,7 +2486,7 @@ button:active:not(:disabled){transform:scale(0.96);}
 
 .hero-card{
   background:var(--surface);border:1px solid;border-radius:14px;padding:20px;
-  box-shadow:0 4px 14px -6px rgba(0,0,0,0.35);
+  box-shadow:0 4px 14px -6px var(--card-shadow-lg);
 }
 .hero-head-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .hero-eyebrow{font-size:12px;font-weight:500;margin-bottom:4px;}
@@ -2189,7 +2509,7 @@ button:active:not(:disabled){transform:scale(0.96);}
   cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
 }
 
-.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 2px 10px -6px rgba(0,0,0,0.3);}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 2px 10px -6px var(--card-shadow);}
 .chart-loading{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12.5px;}
 .card-head{font-size:13px;color:var(--muted);margin-bottom:12px;font-weight:500;}
 
@@ -2245,10 +2565,20 @@ button:active:not(:disabled){transform:scale(0.96);}
 .grip-chip{color:var(--pull);}
 .ex-meta{font-size:11.5px;color:var(--muted);margin-top:2px;}
 .sub-note{color:var(--legs);}
+.ex-last-col{display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;}
 .ex-last-badge{
   background:var(--surface-2);border:1px solid var(--border);border-radius:7px;
-  padding:5px 8px;font-size:11px;text-align:right;line-height:1.35;max-width:120px;flex-shrink:0;
+  padding:5px 8px;font-size:11px;text-align:right;line-height:1.35;max-width:120px;
 }
+.repeat-last-btn{
+  background:none;border:none;color:var(--push);font-size:10.5px;display:flex;align-items:center;gap:3px;
+  cursor:pointer;padding:2px 0;font-family:'IBM Plex Sans',sans-serif;
+}
+.share-chart-btn{
+  background:none;border:none;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:5px;
+  cursor:pointer;padding:8px 0 0;font-family:'IBM Plex Sans',sans-serif;margin:0 auto;
+}
+.share-chart-btn:disabled{opacity:0.5;}
 .muted-sm{color:var(--muted);font-size:9.5px;display:block;text-transform:lowercase;}
 .suggestion{
   display:flex;align-items:center;gap:6px;font-size:12px;margin-top:8px;padding:7px 10px;border-radius:7px;
@@ -2288,6 +2618,7 @@ button:active:not(:disabled){transform:scale(0.96);}
 .export-hint{font-size:12px;margin-bottom:4px;}
 .storage-usage-row{font-size:11.5px;margin-top:6px;}
 .cloud-email{color:var(--text);word-break:break-all;}
+.sync-age-warn{color:var(--legs);font-size:12px;margin:6px 0 0;}
 .password-field{position:relative;}
 .password-field .input{padding-right:40px;}
 .password-toggle{
@@ -2325,6 +2656,10 @@ button:active:not(:disabled){transform:scale(0.96);}
   border-radius:20px;padding:1px 8px;font-size:10px;font-family:'IBM Plex Sans',sans-serif;
 }
 .phase-stat-row{display:flex;justify-content:space-between;align-items:baseline;font-size:12.5px;padding:4px 0;gap:10px;}
+.goal-verdict{margin-top:10px;padding:9px 12px;border-radius:9px;font-size:12.5px;font-weight:500;}
+.goal-verdict.good{background:rgba(76,139,130,0.15);color:var(--pull);}
+.goal-verdict.warn{background:rgba(177,90,52,0.15);color:var(--legs);}
+.goal-verdict.neutral{background:var(--surface-2);color:var(--muted);}
 
 .hist-row{display:grid;grid-template-columns:60px 60px 1fr auto;gap:8px;align-items:center;font-size:12.5px;padding:7px 0;border-top:1px solid var(--border);}
 .hist-row:first-of-type{border-top:none;}
