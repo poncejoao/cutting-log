@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
@@ -1477,19 +1477,30 @@ function CloudBackupCard({ session, cloudStatus }) {
   const [mode, setMode] = useState("signup"); // signup | login
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit() {
     setLoading(true);
     setMsg("");
-    const fn = mode === "signup" ? supabase.auth.signUp : supabase.auth.signInWithPassword;
-    const { data, error } = await fn({ email: email.trim(), password });
-    setLoading(false);
-    if (error) {
-      setMsg(error.message);
-    } else if (mode === "signup" && !data.session) {
-      setMsg("Conta criada — confirma o e-mail que a Supabase mandou e depois entra aqui de novo.");
+    try {
+      // Importante: chamar como supabase.auth.signUp(...)/.signInWithPassword(...)
+      // direto — extrair a função numa variável antes ("const fn = supabase.auth.x")
+      // perde o "this" interno do cliente e trava a chamada pra sempre.
+      const { data, error } =
+        mode === "signup"
+          ? await supabase.auth.signUp({ email: email.trim(), password })
+          : await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      if (error) {
+        setMsg(error.message);
+      } else if (mode === "signup" && !data.session) {
+        setMsg("Conta criada — confirma o e-mail que a Supabase mandou e depois entra aqui de novo.");
+      }
+    } catch (e) {
+      setMsg("Erro inesperado: " + (e?.message || String(e)));
+    } finally {
+      setLoading(false);
     }
   }
   async function handleLogout() {
@@ -1527,14 +1538,23 @@ function CloudBackupCard({ session, cloudStatus }) {
         </button>
       </div>
       <input className="input" type="email" placeholder="E-mail" value={email} onChange={(e) => setEmail(e.target.value)} />
-      <input
-        className="input"
-        type="password"
-        placeholder="Senha (mín. 6 caracteres)"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        style={{ marginTop: 8 }}
-      />
+      <div className="password-field" style={{ marginTop: 8 }}>
+        <input
+          className="input"
+          type={showPassword ? "text" : "password"}
+          placeholder="Senha (mín. 6 caracteres)"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <button
+          type="button"
+          className="password-toggle"
+          onClick={() => setShowPassword((s) => !s)}
+          aria-label={showPassword ? "Esconder senha" : "Mostrar senha"}
+        >
+          {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+        </button>
+      </div>
       {msg && (
         <p className="muted export-hint" style={{ marginTop: 8 }}>
           {msg}
@@ -1994,6 +2014,13 @@ button:active:not(:disabled){transform:scale(0.96);}
 .export-hint{font-size:12px;margin-bottom:4px;}
 .storage-usage-row{font-size:11.5px;margin-top:6px;}
 .cloud-email{color:var(--text);word-break:break-all;}
+.password-field{position:relative;}
+.password-field .input{padding-right:40px;}
+.password-toggle{
+  position:absolute;top:50%;right:6px;transform:translateY(-50%);
+  background:none;border:none;color:var(--muted);cursor:pointer;
+  width:32px;height:32px;display:flex;align-items:center;justify-content:center;padding:0;
+}
 .phase-date-row{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
 .phase-date-row input{min-width:0;}
 .phase-date-label{margin-top:0;margin-bottom:4px;}
