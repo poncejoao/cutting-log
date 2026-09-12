@@ -12,7 +12,14 @@ const ChartFallback = ({ height = 180 }) => (
 
 // ---------- Static plan data (from João's program) ----------
 const DAY_TYPES = { P: "Push", U: "Pull", L: "Legs", D: "Descanso" };
-const DAY_COLOR = { Push: "var(--push)", Pull: "var(--pull)", Legs: "var(--legs)", Descanso: "var(--muted)" };
+const DAY_COLOR = {
+  Push: "var(--push)",
+  Pull: "var(--pull)",
+  Legs: "var(--legs)",
+  Upper: "var(--upper)",
+  Lower: "var(--lower)",
+  Descanso: "var(--muted)",
+};
 const WEEKDAY_LABEL = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 const DEFAULT_SCHEDULE = { 0: "Descanso", 1: "Push", 2: "Pull", 3: "Legs", 4: "Push", 5: "Pull", 6: "Legs" };
 
@@ -38,6 +45,26 @@ const PLAN = {
     { id: "agachamento", n: "Agachamento livre", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra livre", "Smith", "Barra segura (safety bar)"], equivalents: ["Leg press 45°", "Hack machine", "Agachamento búlgaro"] },
     { id: "cadeira-extensora", n: "Cadeira extensora", sets: 3, reps: "10-12", rir: "0-1", variations: ["Bilateral", "Unilateral"], equivalents: ["Agachamento sissy"] },
     { id: "mesa-flexora", n: "Mesa flexora", sets: 3, reps: "10-12", rir: "0-1", variations: ["Deitado", "Sentado", "Em pé unilateral"], equivalents: ["Stiff (RDL) halteres", "Flexora sentado"] },
+    { id: "panturrilha-pe", n: "Panturrilha em pé", sets: 3, reps: "12-15", rir: "0-1", variations: ["Máquina em pé", "Smith", "Halteres"], equivalents: ["Panturrilha no leg press", "Panturrilha Smith"] },
+    { id: "panturrilha-sentada", n: "Panturrilha sentada", sets: 2, reps: "15-20", rir: "0", variations: ["Máquina sentado"], equivalents: ["Panturrilha burrinho (donkey calf raise)"] },
+    { id: "abdomen", n: "Abdômen", sets: 3, reps: "15-20", rir: "0-1", variations: ["Máquina", "Solo", "Polia (cabo)"], equivalents: ["Prancha isométrica", "Elevação de pernas"] },
+  ],
+  // Upper/Lower — pra quando quiser trocar de divisão em vez de PPL. Reusam
+  // os mesmos ids dos exercícios de Push/Pull/Legs de propósito: é o mesmo
+  // exercício físico, então equipamento/pegada escolhidos ficam valendo
+  // independente de em qual divisão você está treinando naquele dia.
+  Upper: [
+    { id: "supino-reto", n: "Supino reto", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino máquina (peck deck press)", "Crucifixo reto halteres"] },
+    { id: "remada-curvada", n: "Remada curvada pronada", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres"], equivalents: ["Remada curvada supinada", "Remada cavalinho (T-bar row)", "Remada máquina"] },
+    { id: "desenvolvimento", n: "Desenvolvimento militar", sets: 3, reps: "8-10", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], equivalents: ["Desenvolvimento Arnold", "Desenvolvimento máquina"] },
+    { id: "puxada-aberta", n: "Puxada aberta", sets: 3, reps: "8-10", rir: "1", variations: ["Pegada aberta", "Pegada supinada", "Pegada neutra", "Máquina"], equivalents: ["Barra fixa (pull-up)", "Puxada triângulo"] },
+    { id: "rosca-direta", n: "Rosca direta", sets: 3, reps: "8-10", rir: "1", variations: ["Barra reta", "Barra W", "Halteres"], grips: ["Supinada", "Neutra", "Pronada"], equivalents: ["Rosca Scott", "Rosca concentrada"] },
+    { id: "triceps-pulley", n: "Tríceps pulley", sets: 3, reps: "10-12", rir: "0-1", variations: ["Barra reta", "Barra V", "Corda", "Puxador unilateral"], equivalents: ["Tríceps testa (skull crusher)", "Mergulho no banco (bench dip)"] },
+  ],
+  Lower: [
+    { id: "agachamento", n: "Agachamento livre", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra livre", "Smith", "Barra segura (safety bar)"], equivalents: ["Leg press 45°", "Hack machine", "Agachamento búlgaro"] },
+    { id: "mesa-flexora", n: "Mesa flexora", sets: 3, reps: "10-12", rir: "0-1", variations: ["Deitado", "Sentado", "Em pé unilateral"], equivalents: ["Stiff (RDL) halteres", "Flexora sentado"] },
+    { id: "cadeira-extensora", n: "Cadeira extensora", sets: 3, reps: "10-12", rir: "0-1", variations: ["Bilateral", "Unilateral"], equivalents: ["Agachamento sissy"] },
     { id: "panturrilha-pe", n: "Panturrilha em pé", sets: 3, reps: "12-15", rir: "0-1", variations: ["Máquina em pé", "Smith", "Halteres"], equivalents: ["Panturrilha no leg press", "Panturrilha Smith"] },
     { id: "panturrilha-sentada", n: "Panturrilha sentada", sets: 2, reps: "15-20", rir: "0", variations: ["Máquina sentado"], equivalents: ["Panturrilha burrinho (donkey calf raise)"] },
     { id: "abdomen", n: "Abdômen", sets: 3, reps: "15-20", rir: "0-1", variations: ["Máquina", "Solo", "Polia (cabo)"], equivalents: ["Prancha isométrica", "Elevação de pernas"] },
@@ -124,7 +151,8 @@ const fmtDateLabel = (iso) => {
   return `${WEEKDAY_LABEL[d.getDay()]} ${d.getDate()}/${d.getMonth() + 1}`;
 };
 const topRep = (range) => parseInt(range.split("-").pop(), 10);
-const isTrainingDay = (dayType) => dayType === "Push" || dayType === "Pull" || dayType === "Legs";
+const isTrainingDay = (dayType) => dayType === "Push" || dayType === "Pull" || dayType === "Legs" || dayType === "Upper" || dayType === "Lower";
+const ALL_DAY_TYPES = ["Push", "Pull", "Legs", "Upper", "Lower", "Descanso"];
 const kcal = (p, c, f) => Math.round(p * 4 + c * 4 + f * 9);
 const computeFromFood = (food, g) => ({
   protein: (food.p * g) / 100,
@@ -269,9 +297,13 @@ export default function App() {
   }
 
   const dow = new Date(selectedDate + "T12:00:00").getDay();
-  const dayType = settings.schedule[dow] || "Descanso";
-  const dietCat = isTrainingDay(dayType) ? "Treino" : "Descanso";
   const dayEntry = logs[selectedDate] || {};
+  const scheduledType = settings.schedule[dow] || "Descanso";
+  // Troca manual do dia (ex: pular pra Push mesmo com Legs/Descanso agendado)
+  // fica junto do resto do dia em `logs`, não em settings — é uma exceção
+  // pontual daquele dia, não uma mudança permanente da divisão semanal.
+  const dayType = dayEntry.dayTypeOverride || scheduledType;
+  const dietCat = isTrainingDay(dayType) ? "Treino" : "Descanso";
 
   function updateDay(patch) {
     setLogs((prev) => ({
@@ -323,6 +355,7 @@ export default function App() {
             selectedDate={selectedDate}
             setSelectedDate={setSelectedDate}
             dayType={dayType}
+            scheduledType={scheduledType}
             dietCat={dietCat}
             dayEntry={dayEntry}
             updateDay={updateDay}
@@ -371,7 +404,8 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 // ---------------- Hoje ----------------
-function HojeTab({ settings, selectedDate, setSelectedDate, dayType, dietCat, dayEntry, updateDay, setTab }) {
+function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab }) {
+  const [switching, setSwitching] = useState(false);
   const training = isTrainingDay(dayType);
   const target = DIET_TARGETS[dietCat];
   const fatTarget = training ? settings.fatTraining : settings.fatRest;
@@ -422,10 +456,44 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, dietCat, da
       </div>
 
       <div className="hero-card" style={{ borderColor: DAY_COLOR[dayType] }}>
-        <div className="hero-eyebrow" style={{ color: DAY_COLOR[dayType] }}>
-          {dietCat === "Treino" ? "Dia de treino" : "Dia de descanso"}
+        <div className="hero-head-row">
+          <div className="hero-eyebrow" style={{ color: DAY_COLOR[dayType] }}>
+            {dietCat === "Treino" ? "Dia de treino" : "Dia de descanso"}
+          </div>
+          <button className="hero-switch-btn" onClick={() => setSwitching((s) => !s)}>
+            <Repeat size={12} /> Trocar
+          </button>
         </div>
         <div className="hero-title">{dayType}</div>
+        {dayEntry.dayTypeOverride && !switching && (
+          <div className="hero-override-note">
+            Trocado de {scheduledType} pra hoje ·{" "}
+            <button className="link-btn" onClick={() => updateDay({ dayTypeOverride: null })}>
+              reverter
+            </button>
+          </div>
+        )}
+        {switching && (
+          <div className="day-switch-row">
+            {ALL_DAY_TYPES.map((dt) => (
+              <button
+                key={dt}
+                className={"day-switch-chip" + (dt === dayType ? " active" : "")}
+                style={
+                  dt === dayType
+                    ? { borderColor: DAY_COLOR[dt], background: DAY_COLOR[dt], color: "#1E1A16" }
+                    : { borderColor: DAY_COLOR[dt], color: DAY_COLOR[dt] }
+                }
+                onClick={() => {
+                  updateDay({ dayTypeOverride: dt === scheduledType ? null : dt });
+                  setSwitching(false);
+                }}
+              >
+                {dt}
+              </button>
+            ))}
+          </div>
+        )}
         {training && (
           <div className="hero-progress">
             {exercisesDone}/{exercisesTotal} exercícios registrados
@@ -1176,13 +1244,20 @@ function ProgressoTab({ logs, settings }) {
         {days.length === 0 && <p className="muted">Nenhum dia registrado ainda.</p>}
         {days.slice(0, 14).map(([d, v]) => {
           const dow = new Date(d + "T12:00:00").getDay();
-          const dt = settings.schedule[dow] || "Descanso";
+          const scheduled = settings.schedule[dow] || "Descanso";
+          const dt = v.dayTypeOverride || scheduled;
+          const wasSwapped = !!v.dayTypeOverride;
           const exCount = v.exercises ? Object.keys(v.exercises).length : 0;
           return (
             <div className="hist-row" key={d}>
               <span className="hist-date">{fmtDateLabel(d)}</span>
-              <span className="hist-tag" style={{ color: DAY_COLOR[dt] }}>
+              <span
+                className="hist-tag"
+                style={{ color: DAY_COLOR[dt] }}
+                title={wasSwapped ? `Agendado: ${scheduled} · trocado pra ${dt}` : undefined}
+              >
                 {dt}
+                {wasSwapped && <span className="hist-swap-dot">●</span>}
               </span>
               <span className="muted mono">{isTrainingDay(dt) ? `${exCount}/${PLAN[dt]?.length || 0} ex` : "—"}</span>
               <span className="muted mono">{v.bodyweight ? `${v.bodyweight}kg` : ""}</span>
@@ -1363,6 +1438,8 @@ function SettingsSheet({ settings, setSettings, logs, onClose }) {
                   <option>Push</option>
                   <option>Pull</option>
                   <option>Legs</option>
+                  <option>Upper</option>
+                  <option>Lower</option>
                   <option>Descanso</option>
                 </select>
               </div>
@@ -1534,6 +1611,8 @@ const CSS = `
   --push:#C6902E;
   --pull:#4C8B82;
   --legs:#B15A34;
+  --upper:#5B7A99;
+  --lower:#8B6F9E;
 }
 
 *{box-sizing:border-box;}
@@ -1593,8 +1672,20 @@ button:active:not(:disabled){transform:scale(0.96);}
   background:var(--surface);border:1px solid;border-radius:14px;padding:20px;
   box-shadow:0 4px 14px -6px rgba(0,0,0,0.35);
 }
+.hero-head-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .hero-eyebrow{font-size:12px;font-weight:500;margin-bottom:4px;}
+.hero-switch-btn{
+  background:none;border:none;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:4px;
+  cursor:pointer;padding:2px 4px;font-family:'IBM Plex Sans',sans-serif;
+}
 .hero-title{font-family:'Fraunces',serif;font-size:30px;font-weight:650;line-height:1.1;}
+.hero-override-note{color:var(--muted);font-size:11.5px;margin-top:4px;}
+.link-btn{background:none;border:none;color:var(--push);font-size:11.5px;text-decoration:underline;cursor:pointer;padding:0;font-family:'IBM Plex Sans',sans-serif;}
+.day-switch-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+.day-switch-chip{
+  background:transparent;border:1px solid var(--border);border-radius:20px;padding:5px 12px;
+  font-size:12px;font-weight:500;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+}
 .hero-progress{color:var(--muted);font-size:13px;margin-top:6px;}
 .hero-cta{
   margin-top:16px;background:var(--surface-2);border:1px solid var(--border);color:var(--text);
@@ -1732,6 +1823,7 @@ button:active:not(:disabled){transform:scale(0.96);}
 .hist-row{display:grid;grid-template-columns:60px 60px 1fr auto;gap:8px;align-items:center;font-size:12.5px;padding:7px 0;border-top:1px solid var(--border);}
 .hist-row:first-of-type{border-top:none;}
 .hist-tag{font-weight:500;}
+.hist-swap-dot{font-size:6px;vertical-align:super;margin-left:2px;}
 
 .tabbar{
   position:fixed;bottom:0;left:50%;transform:translateX(-50%);
