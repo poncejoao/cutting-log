@@ -227,6 +227,45 @@ function computePhaseStats(logs, phase) {
   };
 }
 
+// Índice de força geral: cada levantamento-âncora normalizado pro primeiro
+// valor já registrado (=100%) e depois com a média dos 3 tirada por dia —
+// evita que agachamento (mais pesado) domine a curva só por causa da escala.
+function computeStrengthIndex(logs) {
+  const baseline = {};
+  ANCHOR_LIFTS.forEach((name) => {
+    const first = firstInRange(logs, exerciseMaxWeightPred(name), "0000-01-01", null);
+    if (first) baseline[name] = first.value;
+  });
+  return Object.entries(logs)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([d, v]) => {
+      const pcts = ANCHOR_LIFTS.map((name) => {
+        const w = exerciseMaxWeightPred(name)(v);
+        return w != null && baseline[name] ? (w / baseline[name]) * 100 : null;
+      }).filter((p) => p != null);
+      if (!pcts.length) return null;
+      return { date: d.slice(5), indice: Math.round(pcts.reduce((a, b) => a + b, 0) / pcts.length) };
+    })
+    .filter(Boolean);
+}
+
+// Valor de um indicador "como estava" numa data específica — o último
+// registro conhecido até ali (não precisa ter sido registrado bem naquele
+// dia exato).
+function valueAsOf(logs, pred, date) {
+  return lastInRange(logs, pred, "0000-01-01", date);
+}
+function computeDateCompare(logs, dateA, dateB) {
+  const wA = valueAsOf(logs, bodyweightPred, dateA);
+  const wB = valueAsOf(logs, bodyweightPred, dateB);
+  const lifts = ANCHOR_LIFTS.map((name) => {
+    const a = valueAsOf(logs, exerciseMaxWeightPred(name), dateA);
+    const b = valueAsOf(logs, exerciseMaxWeightPred(name), dateB);
+    return { name, a: a?.value ?? null, b: b?.value ?? null };
+  });
+  return { weightA: wA?.value ?? null, weightB: wB?.value ?? null, lifts };
+}
+
 function useDebouncedSave(value, key, ready) {
   const timer = useRef(null);
   const latest = useRef(value);
@@ -290,6 +329,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [session, setSession] = useState(null);
   const [cloudStatus, setCloudStatus] = useState("idle"); // idle | syncing | synced | error
+  const [recoveryMode, setRecoveryMode] = useState(false);
   const pulledFromCloud = useRef(false);
 
   useEffect(() => {
@@ -310,7 +350,13 @@ export default function App() {
   // Configurações. Sessão persiste sozinha no navegador entre aberturas.
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
+    const { data: sub } = supabase.auth.onAuthStateChange((event, sess) => {
+      setSession(sess);
+      if (event === "PASSWORD_RECOVERY") {
+        setRecoveryMode(true);
+        setShowSettings(true);
+      }
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -416,9 +462,23 @@ export default function App() {
             <div className="brand-sub">João Gabriel · PPL</div>
           </div>
         </div>
-        <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Configurações">
-          <Settings size={18} />
-        </button>
+        <div className="topbar-actions">
+          {session && (
+            <button
+              className="icon-btn cloud-status-btn"
+              onClick={() => setShowSettings(true)}
+              aria-label="Status do backup na nuvem"
+              title={
+                cloudStatus === "syncing" ? "Sincronizando…" : cloudStatus === "error" ? "Erro ao sincronizar" : "Nuvem em dia"
+              }
+            >
+              <Cloud size={16} className={"cloud-status-icon " + cloudStatus} />
+            </button>
+          )}
+          <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Configurações">
+            <Settings size={18} />
+          </button>
+        </div>
       </header>
 
       <main className="content">
@@ -468,6 +528,8 @@ export default function App() {
           onCleanEmptyDays={cleanEmptyDays}
           session={session}
           cloudStatus={cloudStatus}
+          recoveryMode={recoveryMode}
+          onRecoveryDone={() => setRecoveryMode(false)}
           onClose={() => setShowSettings(false)}
         />
       )}
@@ -606,7 +668,32 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
         />
         <div className="hint">Sempre em jejum, ao acordar, antes de comer/beber — mantém o padrão pra comparação real.</div>
       </div>
+
+      <div className="card">
+        <div className="card-head">Notas do dia</div>
+        <DayNoteField dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} />
+      </div>
     </div>
+  );
+}
+
+function DayNoteField({ dayEntry, updateDay, selectedDate }) {
+  const [note, setNote] = useState(dayEntry.note ?? "");
+  useEffect(() => {
+    setNote(dayEntry.note ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate]);
+
+  return (
+    <textarea
+      className="input note-textarea"
+      placeholder="Como foi o dia? (ex: dormi mal, treino fraco hoje, sem fome...)"
+      value={note}
+      onChange={(e) => {
+        setNote(e.target.value);
+        updateDay({ note: e.target.value });
+      }}
+    />
   );
 }
 
@@ -1295,6 +1382,7 @@ function ProgressoTab({ logs, settings }) {
   const days = Object.entries(logs).sort(([a], [b]) => (a < b ? 1 : -1));
   const currentWeight = bwData.length ? bwData[bwData.length - 1].peso : settings.startWeight;
   const delta = (currentWeight - settings.startWeight).toFixed(1);
+  const strengthData = useMemo(() => computeStrengthIndex(logs), [logs]);
 
   return (
     <div className="stack">
@@ -1316,7 +1404,32 @@ function ProgressoTab({ logs, settings }) {
         </div>
       </div>
 
+      <div className="card">
+        <div className="card-head">Força geral</div>
+        {strengthData.length >= 2 ? (
+          <Suspense fallback={<ChartFallback height={170} />}>
+            <MiniLineChart
+              data={strengthData}
+              dataKey="indice"
+              yDomain={["dataMin - 5", "dataMax + 5"]}
+              height={170}
+              valueSuffix="%"
+            />
+          </Suspense>
+        ) : (
+          <p className="muted">
+            Registre {ANCHOR_LIFTS.join(", ")} por mais sessões pra ver a média de evolução dos 3.
+          </p>
+        )}
+        <p className="hint">
+          Média de Supino reto, Remada curvada pronada e Agachamento livre, cada um relativo à primeira vez que foi
+          registrado (=100%) — assim nenhum dos três domina o gráfico só por pesar mais.
+        </p>
+      </div>
+
       {(settings.phases || []).length > 0 && <PhaseComparisonCard logs={logs} phases={settings.phases} />}
+
+      <DateCompareCard logs={logs} />
 
       <ExerciseProgressCard logs={logs} />
 
@@ -1407,6 +1520,71 @@ function PhaseComparisonCard({ logs, phases }) {
   );
 }
 
+function DateCompareCard({ logs }) {
+  const loggedDates = Object.keys(logs).sort();
+  const [dateA, setDateA] = useState("");
+  const [dateB, setDateB] = useState("");
+
+  const result = dateA && dateB ? computeDateCompare(logs, dateA < dateB ? dateA : dateB, dateA < dateB ? dateB : dateA) : null;
+  const weightDelta = result && result.weightA != null && result.weightB != null ? result.weightB - result.weightA : null;
+
+  return (
+    <div className="card">
+      <div className="card-head">Comparar duas datas</div>
+      <p className="muted export-hint">Escolhe dois dias quaisquer pra ver a diferença de peso e força entre eles.</p>
+      <div className="phase-date-row">
+        <div>
+          <div className="hint phase-date-label">Data 1</div>
+          <input className="input mono" type="date" value={dateA} onChange={(e) => setDateA(e.target.value)} />
+        </div>
+        <div>
+          <div className="hint phase-date-label">Data 2</div>
+          <input className="input mono" type="date" value={dateB} onChange={(e) => setDateB(e.target.value)} />
+        </div>
+      </div>
+      {result && (
+        <div className="phase-card">
+          <div className="phase-stat-row">
+            <span className="muted">Peso corporal</span>
+            {weightDelta != null ? (
+              <span className="mono">
+                {result.weightA}kg → {result.weightB}kg{" "}
+                <span className={weightDelta <= 0 ? "tone-down" : "tone-up"}>
+                  ({weightDelta > 0 ? "+" : ""}
+                  {weightDelta.toFixed(1)}kg)
+                </span>
+              </span>
+            ) : (
+              <span className="muted mono">sem dados suficientes</span>
+            )}
+          </div>
+          {result.lifts.map((lift) => {
+            const liftDelta = lift.a != null && lift.b != null ? lift.b - lift.a : null;
+            const pct = liftDelta != null && lift.a > 0 ? Math.round((liftDelta / lift.a) * 100) : null;
+            return (
+              <div className="phase-stat-row" key={lift.name}>
+                <span className="muted">{lift.name}</span>
+                {liftDelta != null ? (
+                  <span className="mono">
+                    {lift.a}kg → {lift.b}kg{" "}
+                    <span className={liftDelta >= 0 ? "tone-down" : "tone-up"}>
+                      ({pct > 0 ? "+" : ""}
+                      {pct}%)
+                    </span>
+                  </span>
+                ) : (
+                  <span className="muted mono">sem dados suficientes</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {!result && loggedDates.length === 0 && <p className="muted export-hint">Nenhum dia registrado ainda.</p>}
+    </div>
+  );
+}
+
 const ALL_EXERCISES = [...PLAN.Push, ...PLAN.Pull, ...PLAN.Legs].map((e) => e.n);
 
 function ExerciseProgressCard({ logs }) {
@@ -1473,13 +1651,14 @@ function ExerciseProgressCard({ logs }) {
 }
 
 // ---------------- Settings ----------------
-function CloudBackupCard({ session, cloudStatus }) {
+function CloudBackupCard({ session, cloudStatus, recoveryMode, onRecoveryDone }) {
   const [mode, setMode] = useState("signup"); // signup | login
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
 
   async function handleSubmit() {
     setLoading(true);
@@ -1503,8 +1682,77 @@ function CloudBackupCard({ session, cloudStatus }) {
       setLoading(false);
     }
   }
+  async function handleForgotPassword() {
+    if (!email.trim()) {
+      setMsg("Digita seu e-mail ali em cima primeiro.");
+      return;
+    }
+    setLoading(true);
+    setMsg("");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: window.location.origin,
+      });
+      setMsg(error ? error.message : "Te mandamos um e-mail com um link pra criar uma senha nova.");
+    } catch (e) {
+      setMsg("Erro inesperado: " + (e?.message || String(e)));
+    } finally {
+      setLoading(false);
+    }
+  }
   async function handleLogout() {
     await supabase.auth.signOut();
+  }
+  async function handleSetNewPassword() {
+    setLoading(true);
+    setMsg("");
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) {
+        setMsg(error.message);
+      } else {
+        setNewPassword("");
+        onRecoveryDone();
+      }
+    } catch (e) {
+      setMsg("Erro inesperado: " + (e?.message || String(e)));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (recoveryMode) {
+    return (
+      <div className="card">
+        <div className="card-head">Definir nova senha</div>
+        <p className="muted export-hint">Você pediu pra redefinir sua senha — digita a nova aqui embaixo.</p>
+        <div className="password-field">
+          <input
+            className="input"
+            type={showPassword ? "text" : "password"}
+            placeholder="Senha nova (mín. 6 caracteres)"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+          />
+          <button
+            type="button"
+            className="password-toggle"
+            onClick={() => setShowPassword((s) => !s)}
+            aria-label={showPassword ? "Esconder senha" : "Mostrar senha"}
+          >
+            {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+          </button>
+        </div>
+        {msg && (
+          <p className="muted export-hint" style={{ marginTop: 8 }}>
+            {msg}
+          </p>
+        )}
+        <button className="btn-primary" disabled={loading || newPassword.length < 6} onClick={handleSetNewPassword}>
+          <Check size={15} /> {loading ? "Aguenta aí…" : "Salvar nova senha"}
+        </button>
+      </div>
+    );
   }
 
   if (session) {
@@ -1555,6 +1803,11 @@ function CloudBackupCard({ session, cloudStatus }) {
           {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
         </button>
       </div>
+      {mode === "login" && (
+        <button type="button" className="link-btn" style={{ marginTop: 8 }} onClick={handleForgotPassword}>
+          Esqueci minha senha
+        </button>
+      )}
       {msg && (
         <p className="muted export-hint" style={{ marginTop: 8 }}>
           {msg}
@@ -1571,7 +1824,17 @@ function CloudBackupCard({ session, cloudStatus }) {
   );
 }
 
-function SettingsSheet({ settings, setSettings, logs, onCleanEmptyDays, session, cloudStatus, onClose }) {
+function SettingsSheet({
+  settings,
+  setSettings,
+  logs,
+  onCleanEmptyDays,
+  session,
+  cloudStatus,
+  recoveryMode,
+  onRecoveryDone,
+  onClose,
+}) {
   const [local, setLocal] = useState(settings);
   const [newPhase, setNewPhase] = useState({ name: "", start: "", end: "" });
 
@@ -1726,7 +1989,12 @@ function SettingsSheet({ settings, setSettings, logs, onCleanEmptyDays, session,
               <CalendarRange size={15} /> Adicionar fase
             </button>
           </div>
-          <CloudBackupCard session={session} cloudStatus={cloudStatus} />
+          <CloudBackupCard
+            session={session}
+            cloudStatus={cloudStatus}
+            recoveryMode={recoveryMode}
+            onRecoveryDone={onRecoveryDone}
+          />
           <div className="card">
             <div className="card-head">Armazenamento</div>
             <div className="bar-track">
@@ -1878,11 +2146,16 @@ button:active:not(:disabled){transform:scale(0.96);}
 .brand-mark{width:10px;height:10px;border-radius:2px;display:inline-block;}
 .brand-title{font-family:'Fraunces',serif;font-weight:650;font-size:19px;letter-spacing:-0.01em;}
 .brand-sub{font-size:11.5px;color:var(--muted);margin-top:1px;}
+.topbar-actions{display:flex;align-items:center;gap:8px;}
 .icon-btn{
   background:var(--surface-2);border:1px solid var(--border);color:var(--text);
   width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;
   cursor:pointer;flex-shrink:0;
 }
+.cloud-status-icon.synced{color:var(--pull);}
+.cloud-status-icon.error{color:var(--legs);}
+.cloud-status-icon.syncing{color:var(--push);animation:cloud-pulse 1s ease-in-out infinite;}
+@keyframes cloud-pulse{0%,100%{opacity:1;}50%{opacity:0.35;}}
 
 .content{flex:1;padding:16px;}
 .stack{display:flex;flex-direction:column;gap:14px;}
@@ -1944,6 +2217,7 @@ button:active:not(:disabled){transform:scale(0.96);}
   border-radius:8px;padding:9px 11px;font-size:14px;width:100%;font-family:'IBM Plex Sans',sans-serif;
 }
 .input:focus{outline:none;border-color:var(--push);box-shadow:0 0 0 3px rgba(198,144,46,0.15);}
+.note-textarea{min-height:72px;resize:vertical;line-height:1.4;}
 
 .section-title{font-family:'Fraunces',serif;font-size:16px;font-weight:650;margin-bottom:2px;}
 
