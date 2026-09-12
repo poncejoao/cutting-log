@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut } from "lucide-react";
+import { supabase } from "./supabaseClient.js";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
 // gráficos da aba Progresso — carrega sob demanda em vez de no boot do app.
@@ -287,6 +288,9 @@ export default function App() {
   const [logs, setLogs] = useState({});
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
+  const [session, setSession] = useState(null);
+  const [cloudStatus, setCloudStatus] = useState("idle"); // idle | syncing | synced | error
+  const pulledFromCloud = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -301,6 +305,53 @@ export default function App() {
       setReady(true);
     })();
   }, []);
+
+  // Backup na nuvem (Supabase) — opcional, só ativa se o usuário logar em
+  // Configurações. Sessão persiste sozinha no navegador entre aberturas.
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, sess) => setSession(sess));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // Aparelho novo/reinstalado: se logar e o localStorage estiver vazio, puxa
+  // o que já tinha na nuvem em vez de sobrescrever com nada.
+  useEffect(() => {
+    if (!ready || !session || pulledFromCloud.current) return;
+    pulledFromCloud.current = true;
+    (async () => {
+      const { data, error } = await supabase
+        .from("backups")
+        .select("logs,settings")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (error) {
+        console.error("cloud pull failed", error);
+        return;
+      }
+      if (data && Object.keys(logs).length === 0) {
+        if (data.logs) setLogs(data.logs);
+        if (data.settings) setSettings((prev) => ({ ...prev, ...data.settings }));
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, session]);
+
+  // Empurra pra nuvem sempre que logs/settings mudam, com um pequeno atraso
+  // (não precisa da urgência do flush local — o localStorage já é a fonte
+  // confiável; a nuvem é só o espelho/seguro contra perda do aparelho).
+  useEffect(() => {
+    if (!ready || !session) return;
+    const timer = setTimeout(async () => {
+      setCloudStatus("syncing");
+      const { error } = await supabase
+        .from("backups")
+        .upsert({ user_id: session.user.id, logs, settings, updated_at: new Date().toISOString() });
+      setCloudStatus(error ? "error" : "synced");
+      if (error) console.error("cloud push failed", error);
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [logs, settings, session, ready]);
 
   const saveLogsNow = useDebouncedSave(logs, "logs", ready);
   const saveSettingsNow = useDebouncedSave(settings, "settings", ready);
@@ -415,6 +466,8 @@ export default function App() {
           setSettings={setSettings}
           logs={logs}
           onCleanEmptyDays={cleanEmptyDays}
+          session={session}
+          cloudStatus={cloudStatus}
           onClose={() => setShowSettings(false)}
         />
       )}
@@ -1420,7 +1473,85 @@ function ExerciseProgressCard({ logs }) {
 }
 
 // ---------------- Settings ----------------
-function SettingsSheet({ settings, setSettings, logs, onCleanEmptyDays, onClose }) {
+function CloudBackupCard({ session, cloudStatus }) {
+  const [mode, setMode] = useState("signup"); // signup | login
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit() {
+    setLoading(true);
+    setMsg("");
+    const fn = mode === "signup" ? supabase.auth.signUp : supabase.auth.signInWithPassword;
+    const { data, error } = await fn({ email: email.trim(), password });
+    setLoading(false);
+    if (error) {
+      setMsg(error.message);
+    } else if (mode === "signup" && !data.session) {
+      setMsg("Conta criada — confirma o e-mail que a Supabase mandou e depois entra aqui de novo.");
+    }
+  }
+  async function handleLogout() {
+    await supabase.auth.signOut();
+  }
+
+  if (session) {
+    return (
+      <div className="card">
+        <div className="card-head">Backup na nuvem</div>
+        <p className="muted export-hint">
+          Sincronizado com <strong className="cloud-email">{session.user.email}</strong> ·{" "}
+          {cloudStatus === "syncing" ? "salvando…" : cloudStatus === "error" ? "erro ao sincronizar" : "tudo em dia"}
+        </p>
+        <button className="btn-secondary" onClick={handleLogout}>
+          <LogOut size={15} /> Sair dessa conta
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">Backup na nuvem</div>
+      <p className="muted export-hint">
+        Cria uma conta uma vez — daí pra frente tudo sincroniza sozinho. Se trocar de celular, é só entrar de novo
+        com o mesmo e-mail e senha.
+      </p>
+      <div className="mode-toggle">
+        <button className={mode === "signup" ? "mode-btn active" : "mode-btn"} onClick={() => setMode("signup")}>
+          Criar conta
+        </button>
+        <button className={mode === "login" ? "mode-btn active" : "mode-btn"} onClick={() => setMode("login")}>
+          Já tenho conta
+        </button>
+      </div>
+      <input className="input" type="email" placeholder="E-mail" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <input
+        className="input"
+        type="password"
+        placeholder="Senha (mín. 6 caracteres)"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        style={{ marginTop: 8 }}
+      />
+      {msg && (
+        <p className="muted export-hint" style={{ marginTop: 8 }}>
+          {msg}
+        </p>
+      )}
+      <button
+        className="btn-primary"
+        disabled={loading || !email.trim() || password.length < 6}
+        onClick={handleSubmit}
+      >
+        <Cloud size={15} /> {loading ? "Aguenta aí…" : mode === "signup" ? "Criar conta e ativar backup" : "Entrar"}
+      </button>
+    </div>
+  );
+}
+
+function SettingsSheet({ settings, setSettings, logs, onCleanEmptyDays, session, cloudStatus, onClose }) {
   const [local, setLocal] = useState(settings);
   const [newPhase, setNewPhase] = useState({ name: "", start: "", end: "" });
 
@@ -1575,6 +1706,7 @@ function SettingsSheet({ settings, setSettings, logs, onCleanEmptyDays, onClose 
               <CalendarRange size={15} /> Adicionar fase
             </button>
           </div>
+          <CloudBackupCard session={session} cloudStatus={cloudStatus} />
           <div className="card">
             <div className="card-head">Armazenamento</div>
             <div className="bar-track">
@@ -1861,6 +1993,7 @@ button:active:not(:disabled){transform:scale(0.96);}
 }
 .export-hint{font-size:12px;margin-bottom:4px;}
 .storage-usage-row{font-size:11.5px;margin-top:6px;}
+.cloud-email{color:var(--text);word-break:break-all;}
 .phase-date-row{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
 .phase-date-row input{min-width:0;}
 .phase-date-label{margin-top:0;margin-bottom:4px;}
