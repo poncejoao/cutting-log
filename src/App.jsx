@@ -165,6 +165,18 @@ const computeFromFood = (food, g) => ({
 // type="text" + inputMode="decimal" e passam por aqui pra normalizar.
 const sanitizeDecimal = (v) => v.replace(",", ".").replace(/[^0-9.]/g, "");
 
+// Um dia "vazio" é sobra técnica (ex: você trocou o tipo de treino e voltou
+// atrás, ou abriu o app sem registrar nada) — sem peso, sem série de
+// exercício com valor e sem refeição. Seguro de apagar, ao contrário do
+// resto do histórico.
+function isEmptyDay(v) {
+  if (!v) return true;
+  const hasWeight = v.bodyweight != null;
+  const hasExercise = v.exercises && Object.values(v.exercises).some((e) => e?.sets?.length);
+  const hasMeals = v.meals && v.meals.length > 0;
+  return !hasWeight && !hasExercise && !hasMeals;
+}
+
 // ---------- Comparação de fases ----------
 // Acha o primeiro/último dia dentro do intervalo [from, to] em que `pred(v)`
 // devolve um valor (não-nulo) — usado pra achar o peso/carga mais próximo do
@@ -312,6 +324,16 @@ export default function App() {
     }));
   }
 
+  function cleanEmptyDays() {
+    setLogs((prev) => {
+      const next = {};
+      Object.entries(prev).forEach(([d, v]) => {
+        if (!isEmptyDay(v)) next[d] = v;
+      });
+      return next;
+    });
+  }
+
   // Histórico por exercício, indexado uma vez por mudança em `logs` em vez de
   // escanear todos os dias de novo pra cada exercício em cada render — o
   // custo cresce com meses de uso, então vale memoizar.
@@ -388,7 +410,13 @@ export default function App() {
       </nav>
 
       {showSettings && (
-        <SettingsSheet settings={settings} setSettings={setSettings} logs={logs} onClose={() => setShowSettings(false)} />
+        <SettingsSheet
+          settings={settings}
+          setSettings={setSettings}
+          logs={logs}
+          onCleanEmptyDays={cleanEmptyDays}
+          onClose={() => setShowSettings(false)}
+        />
       )}
     </div>
   );
@@ -1392,9 +1420,27 @@ function ExerciseProgressCard({ logs }) {
 }
 
 // ---------------- Settings ----------------
-function SettingsSheet({ settings, setSettings, logs, onClose }) {
+function SettingsSheet({ settings, setSettings, logs, onCleanEmptyDays, onClose }) {
   const [local, setLocal] = useState(settings);
   const [newPhase, setNewPhase] = useState({ name: "", start: "", end: "" });
+
+  const storage = useMemo(() => {
+    const logsBytes = new Blob([JSON.stringify(logs)]).size;
+    const settingsBytes = new Blob([JSON.stringify(settings)]).size;
+    const totalBytes = logsBytes + settingsBytes;
+    const QUOTA_BYTES = 5 * 1024 * 1024; // 5MB — mínimo garantido pelo Safari
+    const dayCount = Object.keys(logs).length;
+    const emptyDays = Object.entries(logs).filter(([, v]) => isEmptyDay(v));
+    const avgPerDay = dayCount > 0 ? totalBytes / dayCount : 0;
+    const daysLeft = avgPerDay > 0 ? Math.floor((QUOTA_BYTES - totalBytes) / avgPerDay) : null;
+    return {
+      totalBytes,
+      pct: Math.min(100, (totalBytes / QUOTA_BYTES) * 100),
+      dayCount,
+      emptyCount: emptyDays.length,
+      yearsLeft: daysLeft != null ? (daysLeft / 365).toFixed(0) : null,
+    };
+  }, [logs, settings]);
 
   function addPhase() {
     if (!newPhase.name.trim() || !newPhase.start) return;
@@ -1528,6 +1574,31 @@ function SettingsSheet({ settings, setSettings, logs, onClose }) {
             <button className="btn-secondary" onClick={addPhase} disabled={!newPhase.name.trim() || !newPhase.start}>
               <CalendarRange size={15} /> Adicionar fase
             </button>
+          </div>
+          <div className="card">
+            <div className="card-head">Armazenamento</div>
+            <div className="bar-track">
+              <div className="bar-fill" style={{ width: storage.pct + "%", background: "var(--push)" }} />
+            </div>
+            <div className="storage-usage-row mono muted">
+              {(storage.totalBytes / 1024).toFixed(1)}KB usados de ~5MB ({storage.pct.toFixed(2)}%)
+            </div>
+            <p className="muted export-hint">
+              {storage.dayCount} dia(s) registrado(s).{" "}
+              {storage.yearsLeft != null
+                ? `Nesse ritmo, dá pra usar por mais de ${storage.yearsLeft} anos sem se preocupar com espaço.`
+                : "Comece a registrar pra ver a estimativa de quanto tempo o espaço dura."}
+            </p>
+            {storage.emptyCount > 0 && (
+              <button
+                className="btn-secondary"
+                onClick={() => {
+                  onCleanEmptyDays();
+                }}
+              >
+                <Trash2 size={15} /> Limpar {storage.emptyCount} dia(s) vazio(s)
+              </button>
+            )}
           </div>
           <div className="card">
             <div className="card-head">Exportar dados</div>
@@ -1789,6 +1860,7 @@ button:active:not(:disabled){transform:scale(0.96);}
   font-family:'IBM Plex Sans',sans-serif;margin-top:8px;
 }
 .export-hint{font-size:12px;margin-bottom:4px;}
+.storage-usage-row{font-size:11.5px;margin-top:6px;}
 .phase-date-row{display:flex;flex-direction:column;gap:8px;margin-top:8px;}
 .phase-date-row input{min-width:0;}
 .phase-date-label{margin-top:0;margin-bottom:4px;}
