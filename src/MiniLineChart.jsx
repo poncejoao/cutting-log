@@ -11,6 +11,8 @@ export default function MiniLineChart({
   wrapperStyle,
   tooltipFormatter,
   valueSuffix = "",
+  secondaryDataKey,
+  secondaryLabel,
 }) {
   return (
     <div style={{ height, ...wrapperStyle }}>
@@ -22,9 +24,22 @@ export default function MiniLineChart({
           <Tooltip
             contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }}
             labelStyle={{ color: "var(--text)" }}
-            formatter={tooltipFormatter || ((value) => [`${value}${valueSuffix}`, null])}
+            formatter={
+              tooltipFormatter ||
+              ((value, name) => [`${value}${valueSuffix}`, name === secondaryDataKey ? secondaryLabel || name : null])
+            }
           />
           <Line type="monotone" dataKey={dataKey} stroke="var(--push)" strokeWidth={2} dot={{ r: 3 }} />
+          {secondaryDataKey && (
+            <Line
+              type="monotone"
+              dataKey={secondaryDataKey}
+              stroke="var(--pull)"
+              strokeWidth={2}
+              strokeDasharray="5 4"
+              dot={false}
+            />
+          )}
         </LineChart>
       </ResponsiveContainer>
     </div>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff, Mic } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 import { isPushSupported, getPushPermission, isPushEnabled, enablePush, disablePush } from "./push.js";
 
@@ -444,6 +444,34 @@ function computePlateau(logs, goalWeight) {
   return null;
 }
 
+// TDEE estimado a partir dos dados reais (não uma fórmula genérica) — cruza
+// a variação de peso de verdade com as calorias registradas: se você comeu
+// uma média X e perdeu Y num intervalo de Z dias, seu gasto real é
+// X - (Y×7700 ÷ Z) (7700kcal ≈ 1kg de gordura). Mais confiável que qualquer
+// fórmula de bolso, porque usa o comportamento real do seu corpo.
+function computeTDEE(logs) {
+  const to = todayISO();
+  const fromD = new Date();
+  fromD.setDate(fromD.getDate() - 20);
+  const from = todayISO(fromD);
+  const daysWithMeals = Object.entries(logs)
+    .filter(([d, v]) => d >= from && d <= to && v.meals?.length)
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  if (daysWithMeals.length < 7) return null;
+  const avgKcal =
+    daysWithMeals.reduce((sum, [, v]) => sum + v.meals.reduce((s, m) => s + kcal(m.protein, m.carb, m.fat), 0), 0) /
+    daysWithMeals.length;
+  const wStart = firstInRange(logs, bodyweightPred, from, to);
+  const wEnd = lastInRange(logs, bodyweightPred, from, to);
+  if (!wStart || !wEnd || wStart.date === wEnd.date) return null;
+  const daysSpan = (new Date(wEnd.date) - new Date(wStart.date)) / 86400000;
+  if (daysSpan < 7) return null;
+  const weightChangeKg = wEnd.value - wStart.value;
+  const tdee = avgKcal - (weightChangeKg * 7700) / daysSpan;
+  if (tdee < 800 || tdee > 6000) return null; // fora da faixa plausível, dado ruim demais pra confiar
+  return { tdee: Math.round(tdee), avgKcal: Math.round(avgKcal), daysUsed: daysWithMeals.length, weightChangeKg, daysSpan: Math.round(daysSpan) };
+}
+
 // 1RM estimado pela fórmula de Epley — mais estável que olhar só a carga
 // bruta, porque combina peso e reps num número só (útil quando as reps
 // variam de sessão pra sessão mas a carga não muda muito).
@@ -535,6 +563,10 @@ function computeWeekSummary(logs, settings, prHistory) {
   const wStart = firstInRange(logs, bodyweightPred, from, to);
   const wEnd = lastInRange(logs, bodyweightPred, from, to);
   const prsThisWeek = prHistory.filter((p) => p.date >= from && p.date <= to);
+  const sleepEntries = Object.entries(logs)
+    .filter(([d, v]) => d >= from && d <= to && v.sleepHours != null)
+    .map(([, v]) => v.sleepHours);
+  const avgSleep = sleepEntries.length ? sleepEntries.reduce((a, b) => a + b, 0) / sleepEntries.length : null;
   return {
     from,
     to,
@@ -542,6 +574,7 @@ function computeWeekSummary(logs, settings, prHistory) {
     weightStart: wStart?.value ?? null,
     weightEnd: wEnd?.value ?? null,
     prCount: prsThisWeek.length,
+    avgSleep,
   };
 }
 
@@ -982,6 +1015,8 @@ export default function App() {
     setShowTour(false);
   }
 
+  const [showChangelog, setShowChangelog] = useState(false);
+
   useEffect(() => {
     (async () => {
       try {
@@ -1236,10 +1271,13 @@ export default function App() {
           recoveryMode={recoveryMode}
           onRecoveryDone={() => setRecoveryMode(false)}
           onClose={() => setShowSettings(false)}
+          onShowChangelog={() => setShowChangelog(true)}
         />
       )}
 
       {showTour && <OnboardingTour onDone={dismissTour} />}
+
+      {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
     </div>
   );
 }
@@ -1296,6 +1334,111 @@ function OnboardingTour({ onDone }) {
             Pular
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Agrupado por tema em vez de por data exata (as features foram todas
+// adicionadas na mesma sessão de desenvolvimento) — mais fácil de escanear.
+const CHANGELOG = [
+  {
+    title: "Inteligência e ajustes finos",
+    items: [
+      "Previsão de data da meta",
+      "Detecção de platô",
+      "TDEE estimado a partir dos seus próprios dados",
+      "Calculadora de macros inicial",
+      "Média móvel de 7 dias no gráfico de peso",
+      "Registro de sono",
+      "Importar backup",
+      "Resumo compartilhável (mês/ano)",
+      "Tour pra novo usuário",
+      "Dica técnica por exercício",
+      "Tamanho de fonte ajustável",
+    ],
+  },
+  {
+    title: "Notificações push",
+    items: [
+      "Lembretes de treino, peso, água e sincronização direto no celular, mesmo com o app fechado",
+      "Aviso de novo recorde e de meta batida",
+      "Preferências e horários configuráveis por tipo",
+    ],
+  },
+  {
+    title: "Treino avançado",
+    items: [
+      "Superset/circuito",
+      "Cronômetro de treino",
+      "RIR sentido vs planejado",
+      "Aquecimento sugerido",
+      "Aviso de dor/desconforto",
+      "Templates de treino personalizados",
+      "Tela sempre acesa durante o treino",
+      "Compartilhar treino em texto",
+    ],
+  },
+  {
+    title: "Progresso e insights",
+    items: [
+      "Calendário de treinos em heatmap",
+      "Comparação automática com 3 meses atrás",
+      "Resumo semanal e mensal automáticos",
+      "Padrão por dia da semana",
+      "Volume por grupo muscular",
+      "Histórico de recordes",
+      "Exportar resumo em PDF",
+    ],
+  },
+  {
+    title: "Dieta e corpo",
+    items: [
+      "Sugestão de alimento pra bater a meta",
+      "Checklist de suplementos",
+      "Fotos de progresso",
+      "Medidas corporais (cintura/braço/peito/coxa)",
+      "Hidratação",
+      "Clonar refeições de ontem",
+    ],
+  },
+  {
+    title: "Base",
+    items: [
+      "Recorde pessoal (PR) automático",
+      "Deload sugerido",
+      "Comparação de fases",
+      "Backup na nuvem",
+      "1RM estimado",
+      "Streak de dias",
+      "Atalhos do ícone",
+      "Desfazer última ação",
+    ],
+  },
+];
+
+function ChangelogModal({ onClose }) {
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head">
+          <span>Novidades do app</span>
+          <button className="icon-btn" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="stack">
+          {CHANGELOG.map((group) => (
+            <div className="card" key={group.title}>
+              <div className="card-head">{group.title}</div>
+              <ul className="changelog-list">
+                {group.items.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -1448,6 +1591,11 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
       </div>
 
       <div className="card">
+        <div className="card-head">Sono</div>
+        <SleepField dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} ready={ready} />
+      </div>
+
+      <div className="card">
         <div className="card-head">Hidratação</div>
         <WaterCounter dayEntry={dayEntry} updateDay={updateDay} target={settings.waterTarget} />
       </div>
@@ -1476,6 +1624,31 @@ const MEASUREMENT_FIELDS = [
   { key: "chest", label: "Peito" },
   { key: "thigh", label: "Coxa" },
 ];
+
+function SleepField({ dayEntry, updateDay, selectedDate, ready }) {
+  const [val, setVal] = useState(dayEntry.sleepHours ?? "");
+  useEffect(() => {
+    setVal(dayEntry.sleepHours ?? "");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, ready]);
+  return (
+    <div className="bw-row">
+      <input
+        className="input mono"
+        type="text"
+        inputMode="decimal"
+        placeholder="ex: 7.5"
+        value={val}
+        onChange={(e) => {
+          const v = sanitizeDecimal(e.target.value);
+          setVal(v);
+          updateDay({ sleepHours: v === "" ? null : parseFloat(v) });
+        }}
+      />
+      <span className="muted">horas dormidas</span>
+    </div>
+  );
+}
 
 function MeasurementsForm({ dayEntry, updateDay, selectedDate, ready }) {
   const [open, setOpen] = useState(!!dayEntry.measurements);
@@ -1977,6 +2150,37 @@ function ExerciseCard({
     onChange(next.filter((s) => s.weight !== "" || s.reps !== ""));
   }
 
+  // Registrar série por voz — "60 por 8" ou "60 e 8" viram peso=60, reps=8.
+  // Só extrai os dois primeiros números da fala; não entende números por
+  // extenso ("sessenta"), só dígitos falados como número.
+  const [listening, setListening] = useState(false);
+  const speechSupported = typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  function startVoiceInput() {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) return;
+    const recognition = new Recognition();
+    recognition.lang = "pt-BR";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    setListening(true);
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      const numbers = transcript.match(/\d+([.,]\d+)?/g);
+      if (numbers && numbers.length >= 2) {
+        const weight = numbers[0].replace(",", ".");
+        const reps = numbers[1].replace(",", ".");
+        const idx = sets.findIndex((s) => s.weight === "" && s.reps === "");
+        const targetIdx = idx === -1 ? sets.length - 1 : idx;
+        const next = sets.slice();
+        next[targetIdx] = { weight, reps };
+        commit(next);
+      }
+    };
+    recognition.onerror = () => setListening(false);
+    recognition.onend = () => setListening(false);
+    recognition.start();
+  }
+
   function hitTop(entry) {
     if (!entry || !entry.sets || entry.sets.length < plan.sets) return false;
     return entry.sets.every((s) => parseInt(s.reps, 10) >= top);
@@ -2182,6 +2386,17 @@ function ExerciseCard({
           <span>Série</span>
           <span>kg</span>
           <span>reps</span>
+          {speechSupported && (
+            <button
+              type="button"
+              className={"mic-btn" + (listening ? " listening" : "")}
+              onClick={startVoiceInput}
+              aria-label="Registrar série por voz"
+              title='Fala "peso por reps", ex: "60 por 8"'
+            >
+              <Mic size={14} />
+            </button>
+          )}
         </div>
         {sets.map((s, i) => (
           <div className="set-grid-row" key={i}>
@@ -2626,6 +2841,12 @@ function ProgressoTab({ logs, settings }) {
     .filter(([, v]) => v.bodyweight != null)
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([d, v]) => ({ date: d.slice(5), peso: v.bodyweight }));
+  // Média móvel dos últimos 7 registros — o peso do dia oscila com água/sódio;
+  // a média suaviza esse ruído e mostra a tendência real.
+  bwData.forEach((row, i) => {
+    const window = bwData.slice(Math.max(0, i - 6), i + 1);
+    row.media = +(window.reduce((sum, r) => sum + r.peso, 0) / window.length).toFixed(1);
+  });
 
   const days = Object.entries(logs).sort(([a], [b]) => (a < b ? 1 : -1));
   const currentWeight = bwData.length ? bwData[bwData.length - 1].peso : settings.startWeight;
@@ -2636,6 +2857,7 @@ function ProgressoTab({ logs, settings }) {
     [logs, settings.goalWeight, settings.goalDate]
   );
   const plateau = useMemo(() => computePlateau(logs, settings.goalWeight), [logs, settings.goalWeight]);
+  const tdee = useMemo(() => computeTDEE(logs), [logs]);
   const prHistory = useMemo(() => computePRHistory(logs), [logs]);
   const weekSummary = useMemo(() => computeWeekSummary(logs, settings, prHistory), [logs, settings, prHistory]);
   const monthSummary = useMemo(() => computeMonthSummary(logs, settings, prHistory), [logs, settings, prHistory]);
@@ -2663,16 +2885,27 @@ function ProgressoTab({ logs, settings }) {
 
       {plateau && <PlateauCard plateau={plateau} />}
 
+      {tdee && <TDEECard tdee={tdee} />}
+
       <div className="card">
         <div className="card-head">Peso corporal</div>
         {bwData.length >= 2 ? (
           <>
             <div ref={bwChartRef}>
               <Suspense fallback={<ChartFallback height={180} />}>
-                <MiniLineChart data={bwData} dataKey="peso" yDomain={["dataMin - 1", "dataMax + 1"]} height={180} valueSuffix="kg" />
+                <MiniLineChart
+                  data={bwData}
+                  dataKey="peso"
+                  secondaryDataKey="media"
+                  secondaryLabel="Média 7 dias"
+                  yDomain={["dataMin - 1", "dataMax + 1"]}
+                  height={180}
+                  valueSuffix="kg"
+                />
               </Suspense>
             </div>
             <ShareChartButton containerRef={bwChartRef} filename="peso-corporal.png" />
+            <p className="hint">Linha sólida = peso do dia · linha pontilhada = média móvel de 7 dias (a tendência real, sem o ruído de água/sódio).</p>
           </>
         ) : (
           <p className="muted">Registre o peso por alguns dias na aba Hoje pra ver o gráfico.</p>
@@ -2797,6 +3030,12 @@ function WeekSummaryCard({ summary }) {
         <span className="muted">Recordes batidos</span>
         <span className="mono">{summary.prCount}</span>
       </div>
+      {summary.avgSleep != null && (
+        <div className="phase-stat-row">
+          <span className="muted">Sono médio</span>
+          <span className="mono">{summary.avgSleep.toFixed(1)}h</span>
+        </div>
+      )}
       <div className="hint" style={{ marginBottom: 0 }}>
         Últimos 7 dias, atualizado automaticamente.
       </div>
@@ -3136,6 +3375,26 @@ function PlateauCard({ plateau }) {
         {fmtDateLabel(plateau.to)}) — mesmo com a meta ainda longe. Vale reavaliar as calorias ou o NEAT (quanto você
         se movimenta fora do treino).
       </div>
+    </div>
+  );
+}
+
+function TDEECard({ tdee }) {
+  return (
+    <div className="card">
+      <div className="card-head">TDEE estimado</div>
+      <div className="phase-stat-row">
+        <span className="muted">Seu gasto calórico real</span>
+        <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>
+          ~{tdee.tdee} kcal/dia
+        </span>
+      </div>
+      <p className="hint">
+        Calculado a partir de dados reais: você comeu em média {tdee.avgKcal}kcal/dia em {tdee.daysUsed} dia(s)
+        registrado(s) nos últimos {tdee.daysSpan} dias, e {tdee.weightChangeKg <= 0 ? "perdeu" : "ganhou"}{" "}
+        {Math.abs(tdee.weightChangeKg).toFixed(1)}kg nesse intervalo — mais confiável que qualquer fórmula de bolso,
+        porque usa o comportamento real do seu corpo.
+      </p>
     </div>
   );
 }
@@ -3893,6 +4152,120 @@ function CustomTemplatesCard({ templates, onChange }) {
   );
 }
 
+// Sugestão inicial de macros pela fórmula de Mifflin-St Jeor (TMB) × fator de
+// atividade, com proteína alta (2g/kg) fixa e o resto dividido entre carbo e
+// gordura — ponto de partida melhor que chutar um número, mas ainda é uma
+// estimativa: ajuste depois olhando o TDEE real calculado a partir dos seus
+// próprios dados.
+const ACTIVITY_FACTORS = [
+  { v: 1.2, label: "Sedentário" },
+  { v: 1.375, label: "Leve (1-3x/sem)" },
+  { v: 1.55, label: "Moderado (3-5x/sem)" },
+  { v: 1.725, label: "Ativo (6-7x/sem)" },
+  { v: 1.9, label: "Muito ativo" },
+];
+
+function MacroCalculator({ onApply }) {
+  const [open, setOpen] = useState(false);
+  const [sex, setSex] = useState("m");
+  const [weight, setWeight] = useState("");
+  const [height, setHeight] = useState("");
+  const [age, setAge] = useState("");
+  const [activity, setActivity] = useState(1.55);
+  const [deficit, setDeficit] = useState("500");
+
+  const w = parseFloat(weight);
+  const h = parseFloat(height);
+  const a = parseInt(age, 10);
+  const canCalc = w > 0 && h > 0 && a > 0;
+
+  let result = null;
+  if (canCalc) {
+    const bmr = 10 * w + 6.25 * h - 5 * a + (sex === "m" ? 5 : -161);
+    const tdee = bmr * activity;
+    const targetKcalTraining = Math.max(1200, tdee - (parseFloat(deficit) || 0));
+    const targetKcalRest = targetKcalTraining; // mesma meta calórica; só a distribuição de gordura muda no app
+    const protein = Math.round(w * 2);
+    const fat = Math.round((targetKcalTraining * 0.25) / 9);
+    const carb = Math.max(0, Math.round((targetKcalTraining - protein * 4 - fat * 9) / 4));
+    result = { bmr: Math.round(bmr), tdee: Math.round(tdee), targetKcal: Math.round(targetKcalTraining), protein, carb, fat };
+  }
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+      <button type="button" className="warmup-toggle" onClick={() => setOpen((s) => !s)}>
+        <Lightbulb size={13} /> Calculadora de macros {open ? "▲" : "▼"}
+      </button>
+      {open && (
+        <div style={{ marginTop: 10 }}>
+          <div className="mode-toggle">
+            <button className={sex === "m" ? "mode-btn active" : "mode-btn"} onClick={() => setSex("m")}>
+              Homem
+            </button>
+            <button className={sex === "f" ? "mode-btn active" : "mode-btn"} onClick={() => setSex("f")}>
+              Mulher
+            </button>
+          </div>
+          <div className="macro-inputs">
+            <input className="input mono" placeholder="Peso (kg)" inputMode="decimal" value={weight} onChange={(e) => setWeight(sanitizeDecimal(e.target.value))} />
+            <input className="input mono" placeholder="Altura (cm)" inputMode="decimal" value={height} onChange={(e) => setHeight(sanitizeDecimal(e.target.value))} />
+            <input className="input mono" placeholder="Idade" inputMode="numeric" value={age} onChange={(e) => setAge(e.target.value.replace(/\D/g, ""))} />
+          </div>
+          <select className="select select-full" value={activity} onChange={(e) => setActivity(parseFloat(e.target.value))} style={{ marginTop: 8 }}>
+            {ACTIVITY_FACTORS.map((f) => (
+              <option key={f.v} value={f.v}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+          <div className="schedule-row">
+            <span>Déficit calórico (kcal/dia)</span>
+            <input
+              className="input mono settings-input"
+              inputMode="numeric"
+              value={deficit}
+              onChange={(e) => setDeficit(e.target.value.replace(/\D/g, ""))}
+            />
+          </div>
+          {result && (
+            <div className="phase-card">
+              <div className="phase-stat-row">
+                <span className="muted">TMB / TDEE estimados</span>
+                <span className="mono">
+                  {result.bmr} / {result.tdee}kcal
+                </span>
+              </div>
+              <div className="phase-stat-row">
+                <span className="muted">Meta sugerida</span>
+                <span className="mono">
+                  {result.protein}g P · {result.carb}g C · {result.fat}g G ({result.targetKcal}kcal)
+                </span>
+              </div>
+            </div>
+          )}
+          <button
+            className="btn-secondary"
+            disabled={!result}
+            onClick={() =>
+              result &&
+              onApply({
+                Treino: { protein: result.protein, carb: result.carb },
+                Descanso: { protein: result.protein, carb: Math.max(0, result.carb - 40) },
+              })
+            }
+          >
+            <Check size={15} /> Aplicar essa sugestão
+          </button>
+          <p className="hint" style={{ marginBottom: 0 }}>
+            Ponto de partida — ajuste depois olhando o TDEE real calculado a partir dos seus próprios dados, na aba
+            Progresso.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsSheet({
   settings,
   setSettings,
@@ -3905,6 +4278,7 @@ function SettingsSheet({
   recoveryMode,
   onRecoveryDone,
   onClose,
+  onShowChangelog,
 }) {
   const [local, setLocal] = useState(settings);
   const [newPhase, setNewPhase] = useState({ name: "", start: "", end: "" });
@@ -3990,6 +4364,9 @@ function SettingsSheet({
             <X size={18} />
           </button>
         </div>
+        <button type="button" className="link-btn" style={{ marginBottom: 10 }} onClick={onShowChangelog}>
+          Ver novidades do app
+        </button>
         <div className="stack">
           <div className="card">
             <div className="card-head">Aparência</div>
@@ -4102,6 +4479,9 @@ function SettingsSheet({
                 </div>
               </div>
             ))}
+            <MacroCalculator
+              onApply={(targets) => setLocal((prev) => ({ ...prev, macroTargets: targets }))}
+            />
           </div>
           <div className="card">
             <div className="card-head">Meta de água (copos de 250ml/dia)</div>
@@ -4674,7 +5054,7 @@ button:active:not(:disabled){transform:scale(0.96);}
 .set-grid-head, .set-grid-row{
   display:grid;grid-template-columns:32px 1fr 1fr;gap:8px;align-items:center;margin-bottom:8px;
 }
-.set-grid-head{font-size:11px;}
+.set-grid-head{font-size:11px;grid-template-columns:32px 1fr 1fr auto;}
 .set-input{padding:12px 9px;text-align:center;font-size:calc(15px * var(--font-scale, 1));}
 
 .macro-inputs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:10px 0;}
@@ -4926,4 +5306,12 @@ button:active:not(:disabled){transform:scale(0.96);}
 .tour-dots{display:flex;justify-content:center;gap:6px;margin-bottom:18px;}
 .tour-dot{width:6px;height:6px;border-radius:50%;background:var(--border);}
 .tour-dot.active{background:var(--push);width:16px;border-radius:4px;}
+
+.changelog-list{margin:0;padding-left:18px;font-size:12.5px;line-height:1.8;color:var(--text);}
+
+.mic-btn{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--muted);border-radius:20px;
+  width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;padding:0;
+}
+.mic-btn.listening{color:var(--legs);border-color:var(--legs);animation:cloud-pulse 1s ease-in-out infinite;}
 `;

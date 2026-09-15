@@ -34,8 +34,20 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(self.clients.claim());
 });
 
-// Notificação push (lembrete de treino/peso/sincronização) — chega mesmo com
-// o app fechado, mandada pela função `send-reminders` da Supabase.
+// Ação de atalho por tipo de lembrete — aparece como botão direto na
+// notificação (inclusive na tela de bloqueio, dependendo do celular), sem
+// precisar abrir o app pra descobrir onde tocar. O clique nela ainda abre o
+// app (não dá pra gravar dado nenhum a partir do service worker sem risco de
+// corromper o que já está salvo), só que já na aba certa.
+const NOTIFICATION_ACTIONS = {
+  treino: [{ action: "open", title: "Registrar treino" }],
+  peso: [{ action: "open", title: "Registrar peso" }],
+  agua: [{ action: "open", title: "Registrar água" }],
+};
+
+// Notificação push (lembrete de treino/peso/água/sincronização/recorde/meta)
+// — chega mesmo com o app fechado, mandada pela função `send-reminders` da
+// Supabase.
 self.addEventListener("push", (event) => {
   let data = {};
   try {
@@ -49,6 +61,7 @@ self.addEventListener("push", (event) => {
     icon: "/icon-192-v3.png",
     badge: "/icon-192-v3.png",
     data: { url: data.url || "/" },
+    actions: NOTIFICATION_ACTIONS[data.kind] || [],
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
