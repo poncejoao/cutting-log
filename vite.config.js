@@ -20,6 +20,28 @@ export default defineConfig({
           { src: "icon-192-v3.png", sizes: "192x192", type: "image/png" },
           { src: "icon-512-v3.png", sizes: "512x512", type: "image/png" },
         ],
+        // Atalhos do long-press no ícone (Android/iOS 16.4+) — pulam direto
+        // pra aba certa via ?tab=, lido uma vez no boot do App.
+        shortcuts: [
+          {
+            name: "Hoje",
+            short_name: "Hoje",
+            url: "/?tab=hoje",
+            icons: [{ src: "icon-192-v3.png", sizes: "192x192", type: "image/png" }],
+          },
+          {
+            name: "Treino",
+            short_name: "Treino",
+            url: "/?tab=treino",
+            icons: [{ src: "icon-192-v3.png", sizes: "192x192", type: "image/png" }],
+          },
+          {
+            name: "Dieta",
+            short_name: "Dieta",
+            url: "/?tab=dieta",
+            icons: [{ src: "icon-192-v3.png", sizes: "192x192", type: "image/png" }],
+          },
+        ],
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,ico,png,svg}"],

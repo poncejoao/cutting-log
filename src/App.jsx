@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2 } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3 } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
@@ -119,11 +119,6 @@ const FOOD_DB = [
   { n: "Cenoura crua", p: 0.9, c: 9.6, f: 0.2 },
 ];
 
-const DIET_TARGETS = {
-  Treino: { protein: 157.5, carb: 257.5 },
-  Descanso: { protein: 158, carb: 195 },
-};
-
 const DEFAULT_SETTINGS = {
   schedule: DEFAULT_SCHEDULE,
   fatTraining: 60,
@@ -138,12 +133,54 @@ const DEFAULT_SETTINGS = {
   theme: "dark",
   goalWeight: null,
   goalDate: null,
+  macroTargets: { Treino: { protein: 157.5, carb: 257.5 }, Descanso: { protein: 158, carb: 195 } },
+  waterTarget: 8,
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
 // por dia de treino, pra ter um sinal de força mesmo que outros exercícios
 // tenham sido substituídos ao longo do tempo.
 const ANCHOR_LIFTS = ["Supino reto", "Remada curvada pronada", "Agachamento livre"];
+
+// Grupo muscular por id de exercício — usado pro volume semanal por grupo.
+// Upper/Lower reusam os mesmos ids de Push/Pull/Legs de propósito, então um
+// único mapa por id cobre as 5 divisões.
+const MUSCLE_BY_ID = {
+  "supino-reto": "Peito",
+  "supino-inclinado": "Peito",
+  "desenvolvimento": "Ombro",
+  "elevacao-lateral": "Ombro",
+  "triceps-pulley": "Tríceps",
+  "triceps-frances": "Tríceps",
+  "remada-curvada": "Costas",
+  "puxada-aberta": "Costas",
+  "remada-baixa": "Costas",
+  "face-pull": "Ombro",
+  "rosca-direta": "Bíceps",
+  "rosca-martelo": "Bíceps",
+  "lombar-maquina": "Lombar",
+  "agachamento": "Quadríceps",
+  "cadeira-extensora": "Quadríceps",
+  "mesa-flexora": "Posterior de coxa",
+  "panturrilha-pe": "Panturrilha",
+  "panturrilha-sentada": "Panturrilha",
+  "abdomen": "Abdômen",
+};
+// Nome exibido (incluindo substituições/equivalentes) → grupo muscular. Como
+// o exercício logado é salvo pelo NOME (que pode ser um equivalente escolhido
+// pelo usuário), mapear por nome garante que a substituição ainda conte pro
+// grupo muscular certo.
+const NAME_TO_MUSCLE = {};
+["Push", "Pull", "Legs"].forEach((cat) => {
+  PLAN[cat].forEach((ex) => {
+    const muscle = MUSCLE_BY_ID[ex.id];
+    if (!muscle) return;
+    NAME_TO_MUSCLE[ex.n] = muscle;
+    (ex.equivalents || []).forEach((eq) => {
+      NAME_TO_MUSCLE[eq] = muscle;
+    });
+  });
+});
 
 // ---------- Helpers ----------
 const todayISO = (d = new Date()) => {
@@ -317,6 +354,164 @@ function computeGoalStatus(logs, goalWeight, goalDate) {
   return { currentWeight, goalWeight, daysLeft, weeklyRate, neededWeeklyRate, verdict };
 }
 
+// 1RM estimado pela fórmula de Epley — mais estável que olhar só a carga
+// bruta, porque combina peso e reps num número só (útil quando as reps
+// variam de sessão pra sessão mas a carga não muda muito).
+function estimate1RM(weight, reps) {
+  if (!weight || !reps) return 0;
+  return weight * (1 + reps / 30);
+}
+
+// Sequência de dias seguidos com algo registrado (peso, treino, refeição ou
+// água) até o dia mais recente. Não conta "hoje" contra a sequência enquanto
+// ele ainda está vazio — só quebra a sequência se ontem também estava vazio.
+function computeStreak(logs) {
+  let streak = 0;
+  const today = new Date();
+  const todayStr = todayISO(today);
+  const todayHasData = logs[todayStr] && !isEmptyDay(logs[todayStr]);
+  let cursor = todayHasData ? today : new Date(today.getTime() - 86400000);
+  while (true) {
+    const iso = todayISO(cursor);
+    if (logs[iso] && !isEmptyDay(logs[iso])) {
+      streak++;
+      cursor = new Date(cursor.getTime() - 86400000);
+    } else {
+      break;
+    }
+  }
+  return streak;
+}
+
+// Lista de recordes de carga — pra cada exercício, cada sessão em que a carga
+// máxima superou tudo que veio antes vira uma entrada. A primeira sessão
+// registrada de um exercício sempre entra (é a base a partir da qual os
+// próximos recordes são medidos).
+function computePRHistory(logs) {
+  const byName = {};
+  Object.entries(logs)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .forEach(([d, v]) => {
+      if (!v?.exercises) return;
+      Object.entries(v.exercises).forEach(([name, ex]) => {
+        if (!ex?.sets?.length) return;
+        (byName[name] || (byName[name] = [])).push({ date: d, sets: ex.sets });
+      });
+    });
+  const prs = [];
+  Object.entries(byName).forEach(([name, sessions]) => {
+    let maxW = 0;
+    sessions.forEach(({ date, sets }) => {
+      const w = Math.max(0, ...sets.map((s) => parseFloat(s.weight) || 0));
+      if (w > maxW) {
+        maxW = w;
+        prs.push({ date, name, weight: w });
+      }
+    });
+  });
+  return prs.sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+
+// Resumo automático dos últimos 7 dias — sem precisar escolher datas, já
+// mostra treinos feitos, variação de peso e recordes batidos na semana.
+function computeWeekSummary(logs, settings, prHistory) {
+  const to = todayISO();
+  const fromD = new Date();
+  fromD.setDate(fromD.getDate() - 6);
+  const from = todayISO(fromD);
+  let workouts = 0;
+  Object.entries(logs).forEach(([d, v]) => {
+    if (d < from || d > to) return;
+    const dow = new Date(d + "T12:00:00").getDay();
+    const scheduled = settings.schedule[dow] || "Descanso";
+    const dt = v.dayTypeOverride || scheduled;
+    if (isTrainingDay(dt) && v.exercises && Object.keys(v.exercises).length > 0) workouts++;
+  });
+  const wStart = firstInRange(logs, bodyweightPred, from, to);
+  const wEnd = lastInRange(logs, bodyweightPred, from, to);
+  const prsThisWeek = prHistory.filter((p) => p.date >= from && p.date <= to);
+  return {
+    from,
+    to,
+    workouts,
+    weightStart: wStart?.value ?? null,
+    weightEnd: wEnd?.value ?? null,
+    prCount: prsThisWeek.length,
+  };
+}
+
+// Volume (peso × reps somado) dos últimos 7 dias, agrupado por grupo
+// muscular — pra notar se algum grupo ficou de fora na semana.
+function computeMuscleVolume(logs) {
+  const to = todayISO();
+  const fromD = new Date();
+  fromD.setDate(fromD.getDate() - 6);
+  const from = todayISO(fromD);
+  const totals = {};
+  Object.entries(logs).forEach(([d, v]) => {
+    if (d < from || d > to || !v?.exercises) return;
+    Object.entries(v.exercises).forEach(([name, ex]) => {
+      const muscle = NAME_TO_MUSCLE[name];
+      if (!muscle || !ex?.sets?.length) return;
+      const vol = ex.sets.reduce((sum, s) => sum + (parseFloat(s.weight) || 0) * (parseInt(s.reps, 10) || 0), 0);
+      totals[muscle] = (totals[muscle] || 0) + vol;
+    });
+  });
+  return Object.entries(totals)
+    .map(([muscle, volume]) => ({ muscle, volume: Math.round(volume) }))
+    .sort((a, b) => b.volume - a.volume);
+}
+
+// Toca dois bipes curtos (Web Audio, sem precisar de arquivo de áudio) —
+// usado quando o timer de descanso chega a zero.
+function playTimerBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    [0, 0.22].forEach((delay) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.001, ctx.currentTime + delay);
+      gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + delay + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.18);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + delay);
+      osc.stop(ctx.currentTime + delay + 0.2);
+    });
+    setTimeout(() => ctx.close(), 600);
+  } catch (e) {
+    // navegador sem suporte a Web Audio — silencioso, sem quebrar o timer
+  }
+}
+
+// Comprime uma foto antes de guardar no localStorage — sem isso, uma foto de
+// celular moderno (4-5MB) estouraria a cota de 5MB do app sozinha.
+function compressImageFile(file, maxDim = 900, quality = 0.6) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
+  });
+}
+
 function useDebouncedSave(value, key, ready) {
   const timer = useRef(null);
   const latest = useRef(value);
@@ -371,9 +566,16 @@ function useDebouncedSave(value, key, ready) {
   return writeNow;
 }
 
+const VALID_TABS = ["hoje", "treino", "dieta", "progresso"];
+
 export default function App() {
   const [ready, setReady] = useState(false);
-  const [tab, setTab] = useState("hoje");
+  // Atalhos do ícone do app (menu de long-press) abrem em /?tab=treino etc —
+  // lê uma vez no boot e limpa a URL, sem deixar o parâmetro preso ali.
+  const [tab, setTab] = useState(() => {
+    const qs = new URLSearchParams(window.location.search).get("tab");
+    return VALID_TABS.includes(qs) ? qs : "hoje";
+  });
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [logs, setLogs] = useState({});
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -399,6 +601,11 @@ export default function App() {
       } catch (e) {}
       setReady(true);
     })();
+    // Some junto o ?tab= da URL depois de lido, senão ele fica ali preso e
+    // reaparece (ex: se o usuário atualizar a página ou compartilhar o link).
+    if (window.location.search) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
   }, []);
 
   // Backup na nuvem (Supabase) — opcional, só ativa se o usuário logar em
@@ -520,6 +727,8 @@ export default function App() {
     return historyByExercise[name] || [];
   }
 
+  const streak = useMemo(() => computeStreak(logs), [logs]);
+
   return (
     <div className="app">
       <style>{CSS}</style>
@@ -532,6 +741,11 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
+          {streak > 0 && (
+            <div className="streak-badge" title={`${streak} dia(s) seguidos registrando algo no app`}>
+              <Flame size={12} /> {streak}
+            </div>
+          )}
           {session && (
             <button
               className="icon-btn cloud-status-btn"
@@ -562,6 +776,7 @@ export default function App() {
             dayEntry={dayEntry}
             updateDay={updateDay}
             setTab={setTab}
+            ready={ready}
           />
         )}
         {tab === "treino" && (
@@ -574,6 +789,7 @@ export default function App() {
             settings={settings}
             setSettings={setSettings}
             onSaveNow={saveNow}
+            ready={ready}
           />
         )}
         {tab === "dieta" && (
@@ -617,10 +833,10 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 // ---------------- Hoje ----------------
-function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab }) {
+function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready }) {
   const [switching, setSwitching] = useState(false);
   const training = isTrainingDay(dayType);
-  const target = DIET_TARGETS[dietCat];
+  const target = settings.macroTargets[dietCat];
   const fatTarget = training ? settings.fatTraining : settings.fatRest;
   const targetKcal = kcal(target.protein, target.carb, fatTarget);
   const meals = dayEntry.meals || [];
@@ -742,24 +958,117 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
           updateDay={updateDay}
           startWeight={settings.startWeight}
           selectedDate={selectedDate}
+          ready={ready}
         />
         <div className="hint">Sempre em jejum, ao acordar, antes de comer/beber — mantém o padrão pra comparação real.</div>
       </div>
 
       <div className="card">
+        <div className="card-head">Hidratação</div>
+        <WaterCounter dayEntry={dayEntry} updateDay={updateDay} target={settings.waterTarget} />
+      </div>
+
+      <div className="card">
+        <div className="card-head">Foto do dia</div>
+        <PhotoDayCard dayEntry={dayEntry} updateDay={updateDay} />
+      </div>
+
+      <div className="card">
         <div className="card-head">Notas do dia</div>
-        <DayNoteField dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} />
+        <DayNoteField dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} ready={ready} />
       </div>
     </div>
   );
 }
 
-function DayNoteField({ dayEntry, updateDay, selectedDate }) {
+function WaterCounter({ dayEntry, updateDay, target }) {
+  const cups = dayEntry.water || 0;
+  const ml = cups * 250;
+  const targetMl = (target || 8) * 250;
+  const pct = targetMl > 0 ? Math.min(100, (ml / targetMl) * 100) : 0;
+  return (
+    <>
+      <div className="water-row">
+        <button
+          className="water-btn"
+          onClick={() => updateDay({ water: Math.max(0, cups - 1) })}
+          disabled={cups === 0}
+          aria-label="Remover um copo"
+        >
+          <Minus size={16} />
+        </button>
+        <div className="water-count">
+          <Droplet size={16} />
+          <span className="mono">
+            {cups} <span className="muted">/ {target || 8} copos</span>
+          </span>
+        </div>
+        <button className="water-btn" onClick={() => updateDay({ water: cups + 1 })} aria-label="Adicionar um copo">
+          <Plus size={16} />
+        </button>
+      </div>
+      <div className="bar-track" style={{ marginTop: 10 }}>
+        <div className="bar-fill" style={{ width: pct + "%", background: "var(--upper)" }} />
+      </div>
+      <div className="hint" style={{ marginTop: 6, marginBottom: 0 }}>
+        {ml}ml de {targetMl}ml (copo de 250ml)
+      </div>
+    </>
+  );
+}
+
+function PhotoDayCard({ dayEntry, updateDay }) {
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    try {
+      const dataUrl = await compressImageFile(file);
+      updateDay({ photo: dataUrl });
+    } catch (err) {
+      console.error("photo compress failed", err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (dayEntry.photo) {
+    return (
+      <>
+        <img src={dayEntry.photo} alt="Foto do dia" className="progress-photo" />
+        <button className="btn-secondary" onClick={() => updateDay({ photo: null })}>
+          <Trash2 size={15} /> Remover foto
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <input ref={inputRef} type="file" accept="image/*" capture="environment" hidden onChange={handleFile} />
+      <button className="btn-secondary" onClick={() => inputRef.current?.click()} disabled={busy}>
+        <Camera size={15} /> {busy ? "Comprimindo…" : "Adicionar foto"}
+      </button>
+      <div className="hint">A foto é comprimida automaticamente antes de salvar (ocupa mais espaço que o resto dos dados).</div>
+    </>
+  );
+}
+
+function DayNoteField({ dayEntry, updateDay, selectedDate, ready }) {
   const [note, setNote] = useState(dayEntry.note ?? "");
+  // Resincroniza quando o dia muda OU quando os dados terminam de carregar do
+  // storage (o storage é lido de forma assíncrona, então no primeiro render
+  // esse campo nasce vazio mesmo se já existir uma nota salva pra hoje — sem
+  // o `ready` na lista de dependências, o campo ficava com essa aparência de
+  // "vazio" até o usuário trocar de dia e voltar).
   useEffect(() => {
     setNote(dayEntry.note ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate]);
+  }, [selectedDate, ready]);
 
   return (
     <textarea
@@ -792,16 +1101,18 @@ function MacroBar({ label, got, target, color, unit }) {
   );
 }
 
-function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate }) {
+function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate, ready }) {
   const [val, setVal] = useState(dayEntry.bodyweight ?? "");
-  // Só recarrega o campo quando o DIA muda — se ficasse de olho em
-  // dayEntry.bodyweight, cada tecla digitada reescreveria o valor já
-  // arredondado (parseFloat) de volta no campo e apagaria o "." de quem
-  // está no meio de digitar "82.5", por exemplo.
+  // Recarrega o campo quando o DIA muda ou quando os dados terminam de
+  // carregar do storage (`ready`) — não fica de olho em dayEntry.bodyweight
+  // direto, senão cada tecla digitada reescreveria o valor já arredondado
+  // (parseFloat) de volta no campo e apagaria o "." de quem está no meio de
+  // digitar "82.5". Sem o `ready`, o campo nascia vazio no primeiro render
+  // (storage ainda carregando) e nunca mais sincronizava sozinho.
   useEffect(() => {
     setVal(dayEntry.bodyweight ?? "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate]);
+  }, [selectedDate, ready]);
   return (
     <div className="bw-row">
       <input
@@ -822,7 +1133,7 @@ function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate }) 
 }
 
 // ---------------- Treino ----------------
-function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate, settings, setSettings, onSaveNow }) {
+function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate, settings, setSettings, onSaveNow, ready }) {
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   async function handleSaveNow() {
     setSaveState("saving");
@@ -905,6 +1216,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             plan={ex}
             effectiveName={key}
             selectedDate={selectedDate}
+            ready={ready}
             logged={logged[key]?.sets}
             history={exerciseHistory(key)}
             onChange={(sets) => setExerciseSets(key, sets)}
@@ -944,6 +1256,7 @@ function ExerciseCard({
   plan,
   effectiveName,
   selectedDate,
+  ready,
   logged,
   history,
   onChange,
@@ -967,6 +1280,7 @@ function ExerciseCard({
     return base;
   }
   const [sets, setSets] = useState(() => fillSets(logged));
+  const [restLeft, setRestLeft] = useState(null); // segundos restantes do timer de descanso, ou null se parado
 
   // Re-sincroniza só quando o dia ou o exercício mudam de verdade — não a cada
   // tecla. Ao salvar, as séries vazias são filtradas antes de ir pro storage
@@ -974,8 +1288,23 @@ function ExerciseCard({
   // as séries que o usuário ainda está preenchendo na tela.
   useEffect(() => {
     setSets(fillSets(logged));
+    setRestLeft(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate, effectiveName, plan.sets]);
+  }, [selectedDate, effectiveName, plan.sets, ready]);
+
+  // Timer de descanso — decrementa 1x por segundo; ao chegar em zero, vibra e
+  // bipa, mostra "0:00" por 1.5s e some sozinho.
+  useEffect(() => {
+    if (restLeft == null) return;
+    if (restLeft === 0) {
+      playTimerBeep();
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      const t = setTimeout(() => setRestLeft(null), 1500);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => setRestLeft((s) => (s != null ? s - 1 : null)), 1000);
+    return () => clearTimeout(t);
+  }, [restLeft]);
 
   function commit(next) {
     setSets(next);
@@ -1036,15 +1365,31 @@ function ExerciseCard({
       tone: "deload",
     };
   } else if (last) {
-    suggestion = lastTwoHitTop
-      ? { text: `Suba a carga (+2,5–5%) — bateu ${top} reps em todas as séries 2x seguidas`, tone: "up" }
-      : { text: `Meta: adicionar 1 rep mantendo RIR ${plan.rir}`, tone: "hold" };
+    if (lastTwoHitTop) {
+      // Progressão dupla: já bateu o topo das reps 2x seguidas, então sugere
+      // subir a carga (~2,5%, arredondado pro incremento de anilha mais
+      // próximo) e voltar pro início da faixa de reps.
+      const lastTop = topSet(last);
+      const bottomRep = parseInt(plan.reps.split("-")[0], 10) || top;
+      let nextWeight = lastTop && lastTop.w > 0 ? Math.ceil((lastTop.w * 1.025) / 2.5) * 2.5 : null;
+      if (nextWeight != null && nextWeight <= lastTop.w) nextWeight = lastTop.w + 2.5;
+      suggestion = nextWeight
+        ? { text: `Hoje tenta ${nextWeight}kg × ${bottomRep} — bateu ${top} reps em todas as séries 2x seguidas`, tone: "up" }
+        : { text: `Suba a carga (+2,5–5%) — bateu ${top} reps em todas as séries 2x seguidas`, tone: "up" };
+    } else {
+      suggestion = { text: `Meta: adicionar 1 rep mantendo RIR ${plan.rir}`, tone: "hold" };
+    }
   }
 
   // PR de carga: maior peso já registrado numa sessão passada desse exercício.
   const maxPastWeight = Math.max(0, ...pastHistory.flatMap((h) => h.sets.map((s) => parseFloat(s.weight) || 0)));
   const currentMaxWeight = Math.max(0, ...sets.map((s) => parseFloat(s.weight) || 0));
   const isNewPR = maxPastWeight > 0 && currentMaxWeight > maxPastWeight;
+
+  // 1RM estimado (Epley) a partir da série "top" de hoje — só aparece depois
+  // que pelo menos uma série tem peso e reps preenchidos.
+  const currentTopSet = topSet({ sets });
+  const currentE1RM = currentTopSet ? Math.round(estimate1RM(currentTopSet.w, currentTopSet.r)) : null;
 
   return (
     <div className="card exercise-card">
@@ -1099,6 +1444,7 @@ function ExerciseCard({
             {plan.sets}× {plan.reps} reps · RIR {plan.rir}
             {isSubstituted && <span className="sub-note"> · substituindo {plan.n}</span>}
           </div>
+          {currentE1RM != null && <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg</div>}
         </div>
         {last && (
           <div className="ex-last-col">
@@ -1159,13 +1505,37 @@ function ExerciseCard({
           </div>
         ))}
       </div>
+
+      <div className="rest-timer-row">
+        {restLeft == null ? (
+          <>
+            <span className="rest-timer-label muted">
+              <Timer size={13} /> Descanso:
+            </span>
+            {[60, 90, 120].map((s) => (
+              <button key={s} className="rest-timer-btn" onClick={() => setRestLeft(s)}>
+                {s}s
+              </button>
+            ))}
+          </>
+        ) : (
+          <>
+            <span className={"rest-timer-active mono" + (restLeft === 0 ? " rest-timer-done" : "")}>
+              <Timer size={13} /> {Math.floor(restLeft / 60)}:{String(restLeft % 60).padStart(2, "0")}
+            </span>
+            <button className="rest-timer-cancel" onClick={() => setRestLeft(null)}>
+              Cancelar
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
 // ---------------- Dieta ----------------
 function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay }) {
-  const target = DIET_TARGETS[dietCat];
+  const target = settings.macroTargets[dietCat];
   const fatTarget = dietCat === "Treino" ? settings.fatTraining : settings.fatRest;
   const targetKcal = kcal(target.protein, target.carb, fatTarget);
   const meals = dayEntry.meals || [];
@@ -1481,11 +1851,16 @@ function ProgressoTab({ logs, settings }) {
     () => computeGoalStatus(logs, settings.goalWeight, settings.goalDate),
     [logs, settings.goalWeight, settings.goalDate]
   );
+  const prHistory = useMemo(() => computePRHistory(logs), [logs]);
+  const weekSummary = useMemo(() => computeWeekSummary(logs, settings, prHistory), [logs, settings, prHistory]);
+  const muscleVolume = useMemo(() => computeMuscleVolume(logs), [logs]);
   const bwChartRef = useRef(null);
   const strengthChartRef = useRef(null);
 
   return (
     <div className="stack">
+      <WeekSummaryCard summary={weekSummary} />
+
       {goalStatus && <GoalStatusCard status={goalStatus} />}
 
       <div className="card">
@@ -1539,11 +1914,17 @@ function ProgressoTab({ logs, settings }) {
         </p>
       </div>
 
+      <MuscleVolumeCard data={muscleVolume} />
+
       {(settings.phases || []).length > 0 && <PhaseComparisonCard logs={logs} phases={settings.phases} />}
 
       <DateCompareCard logs={logs} />
 
+      <PhotoCompareCard logs={logs} />
+
       <ExerciseProgressCard logs={logs} />
+
+      <PRHistoryCard prHistory={prHistory} />
 
       <div className="card">
         <div className="card-head">Histórico de treino</div>
@@ -1571,6 +1952,124 @@ function ProgressoTab({ logs, settings }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function WeekSummaryCard({ summary }) {
+  const weightDelta =
+    summary.weightStart != null && summary.weightEnd != null ? summary.weightEnd - summary.weightStart : null;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <BarChart3 size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+        Resumo da semana
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Treinos feitos</span>
+        <span className="mono">{summary.workouts}</span>
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Peso corporal</span>
+        {weightDelta != null ? (
+          <span className="mono">
+            {summary.weightStart}kg → {summary.weightEnd}kg{" "}
+            <span className={weightDelta <= 0 ? "tone-down" : "tone-up"}>
+              ({weightDelta > 0 ? "+" : ""}
+              {weightDelta.toFixed(1)}kg)
+            </span>
+          </span>
+        ) : (
+          <span className="muted mono">sem dados suficientes</span>
+        )}
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Recordes batidos</span>
+        <span className="mono">{summary.prCount}</span>
+      </div>
+      <div className="hint" style={{ marginBottom: 0 }}>
+        Últimos 7 dias, atualizado automaticamente.
+      </div>
+    </div>
+  );
+}
+
+function MuscleVolumeCard({ data }) {
+  const maxVol = data[0]?.volume || 0;
+  return (
+    <div className="card">
+      <div className="card-head">Volume por grupo muscular (7 dias)</div>
+      {data.length === 0 ? (
+        <p className="muted">Registre treinos nos últimos 7 dias pra ver o volume por grupo muscular.</p>
+      ) : (
+        data.map((g) => (
+          <div className="macro-row" key={g.muscle}>
+            <div className="macro-labels">
+              <span>{g.muscle}</span>
+              <span className="mono">{g.volume.toLocaleString("pt-BR")}kg</span>
+            </div>
+            <div className="bar-track">
+              <div className="bar-fill" style={{ width: (maxVol ? (g.volume / maxVol) * 100 : 0) + "%", background: "var(--legs)" }} />
+            </div>
+          </div>
+        ))
+      )}
+      <p className="hint" style={{ marginBottom: 0 }}>
+        Soma de peso × reps de cada série, agrupado por grupo muscular — ajuda a notar se algum ficou de fora na semana.
+      </p>
+    </div>
+  );
+}
+
+function PRHistoryCard({ prHistory }) {
+  const top = prHistory.slice(0, 15);
+  return (
+    <div className="card">
+      <div className="card-head">Histórico de recordes</div>
+      {top.length === 0 && <p className="muted">Nenhum recorde registrado ainda.</p>}
+      {top.map((pr, i) => (
+        <div className="hist-row pr-hist-row" key={pr.date + pr.name + i}>
+          <span className="hist-date">{fmtDateLabel(pr.date)}</span>
+          <span className="pr-hist-name">{pr.name}</span>
+          <span className="mono pr-hist-weight">
+            <Trophy size={11} /> {pr.weight}kg
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PhotoCompareCard({ logs }) {
+  const [dateA, setDateA] = useState("");
+  const [dateB, setDateB] = useState("");
+  const photoA = dateA ? logs[dateA]?.photo : null;
+  const photoB = dateB ? logs[dateB]?.photo : null;
+
+  return (
+    <div className="card">
+      <div className="card-head">Comparar fotos</div>
+      <p className="muted export-hint">Escolhe dois dias que tenham foto registrada pra comparar lado a lado.</p>
+      <div className="phase-date-row">
+        <div>
+          <div className="hint phase-date-label">Data 1</div>
+          <input className="input mono" type="date" value={dateA} onChange={(e) => setDateA(e.target.value)} />
+        </div>
+        <div>
+          <div className="hint phase-date-label">Data 2</div>
+          <input className="input mono" type="date" value={dateB} onChange={(e) => setDateB(e.target.value)} />
+        </div>
+      </div>
+      {(dateA || dateB) && (
+        <div className="photo-compare-row">
+          <div className="photo-compare-col">
+            {photoA ? <img src={photoA} alt={dateA} className="progress-photo" /> : dateA && <p className="muted export-hint">Sem foto nesse dia.</p>}
+          </div>
+          <div className="photo-compare-col">
+            {photoB ? <img src={photoB} alt={dateB} className="progress-photo" /> : dateB && <p className="muted export-hint">Sem foto nesse dia.</p>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1749,6 +2248,7 @@ const ALL_EXERCISES = [...PLAN.Push, ...PLAN.Pull, ...PLAN.Legs].map((e) => e.n)
 
 function ExerciseProgressCard({ logs }) {
   const [selected, setSelected] = useState(ALL_EXERCISES[0]);
+  const [metric, setMetric] = useState("carga"); // "carga" (peso máx.) ou "e1rm" (1RM estimado)
   const chartRef = useRef(null);
 
   const data = useMemo(() => {
@@ -1757,13 +2257,22 @@ function ExerciseProgressCard({ logs }) {
       .sort(([a], [b]) => (a < b ? -1 : 1))
       .map(([d, v]) => {
         const sets = v.exercises[selected].sets;
-        const weights = sets.map((s) => parseFloat(s.weight) || 0);
-        const reps = sets.map((s) => parseInt(s.reps, 10) || 0);
+        // Série "top" = maior peso (desempate por reps) — a mesma que decide
+        // PR/estagnação em ExerciseCard, então o 1RM estimado usa reps dessa
+        // mesma série em vez de misturar peso de uma série com reps de outra.
+        const top = sets.reduce((best, s) => {
+          const w = parseFloat(s.weight) || 0;
+          const r = parseInt(s.reps, 10) || 0;
+          if (w === 0) return best;
+          if (!best || w > best.w || (w === best.w && r > best.r)) return { w, r };
+          return best;
+        }, null);
         return {
           date: d.slice(5),
           fullDate: d,
-          carga: Math.max(...weights, 0),
-          reps: Math.max(...reps, 0),
+          carga: top?.w || 0,
+          reps: top?.r || 0,
+          e1rm: top ? Math.round(estimate1RM(top.w, top.r)) : 0,
         };
       });
   }, [logs, selected]);
@@ -1787,6 +2296,14 @@ function ExerciseProgressCard({ logs }) {
           </optgroup>
         ))}
       </select>
+      <div className="mode-toggle" style={{ marginTop: 10, marginBottom: 0 }}>
+        <button className={metric === "carga" ? "mode-btn active" : "mode-btn"} onClick={() => setMetric("carga")}>
+          Carga máxima
+        </button>
+        <button className={metric === "e1rm" ? "mode-btn active" : "mode-btn"} onClick={() => setMetric("e1rm")}>
+          1RM estimado
+        </button>
+      </div>
 
       {data.length >= 2 ? (
         <>
@@ -1794,14 +2311,12 @@ function ExerciseProgressCard({ logs }) {
             <Suspense fallback={<ChartFallback height={170} />}>
               <MiniLineChart
                 data={data}
-                dataKey="carga"
+                dataKey={metric}
                 yDomain={["dataMin - 2", "dataMax + 2"]}
                 height={170}
                 wrapperStyle={{ marginTop: 12 }}
-                tooltipFormatter={(value, name) => [
-                  name === "carga" ? `${value}kg` : `${value} reps`,
-                  name === "carga" ? "Carga máx." : "Reps (série top)",
-                ]}
+                valueSuffix="kg"
+                tooltipFormatter={(value) => [`${value}kg`, metric === "carga" ? "Carga máx." : "1RM estimado"]}
               />
             </Suspense>
           </div>
@@ -2098,6 +2613,64 @@ function SettingsSheet({
                 </select>
               </div>
             ))}
+          </div>
+          <div className="card">
+            <div className="card-head">Meta de macros diária (g/dia)</div>
+            {["Treino", "Descanso"].map((cat) => (
+              <div key={cat}>
+                <div className="hint phase-date-label" style={{ marginTop: cat === "Treino" ? 0 : 10 }}>
+                  Dia de {cat === "Treino" ? "treino" : "descanso"}
+                </div>
+                <div className="macro-inputs" style={{ gridTemplateColumns: "1fr 1fr", margin: "4px 0 0" }}>
+                  <div className="schedule-row">
+                    <span>Proteína</span>
+                    <input
+                      className="input mono settings-input"
+                      type="text"
+                      inputMode="decimal"
+                      value={local.macroTargets[cat].protein}
+                      onChange={(e) =>
+                        setLocal({
+                          ...local,
+                          macroTargets: {
+                            ...local.macroTargets,
+                            [cat]: { ...local.macroTargets[cat], protein: parseFloat(sanitizeDecimal(e.target.value)) || 0 },
+                          },
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="schedule-row">
+                    <span>Carbo</span>
+                    <input
+                      className="input mono settings-input"
+                      type="text"
+                      inputMode="decimal"
+                      value={local.macroTargets[cat].carb}
+                      onChange={(e) =>
+                        setLocal({
+                          ...local,
+                          macroTargets: {
+                            ...local.macroTargets,
+                            [cat]: { ...local.macroTargets[cat], carb: parseFloat(sanitizeDecimal(e.target.value)) || 0 },
+                          },
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="card">
+            <div className="card-head">Meta de água (copos de 250ml/dia)</div>
+            <input
+              className="input mono"
+              type="text"
+              inputMode="numeric"
+              value={local.waterTarget}
+              onChange={(e) => setLocal({ ...local, waterTarget: parseInt(e.target.value, 10) || 0 })}
+            />
           </div>
           <div className="card">
             <div className="card-head">Meta de gordura (g/dia)</div>
@@ -2693,4 +3266,47 @@ button:active:not(:disabled){transform:scale(0.96);}
 }
 .select-full{width:100%;padding:9px 10px;}
 .settings-input{width:80px;text-align:right;}
+
+.streak-badge{
+  display:flex;align-items:center;gap:3px;background:rgba(198,144,46,0.15);color:var(--push);
+  border-radius:20px;padding:4px 9px;font-size:11.5px;font-weight:600;
+}
+
+.water-row{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+.water-btn{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text);
+  width:40px;height:40px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;flex-shrink:0;
+}
+.water-btn:disabled{opacity:0.35;cursor:default;}
+.water-count{display:flex;align-items:center;gap:6px;color:var(--upper);font-size:15px;font-weight:500;}
+
+.progress-photo{width:100%;border-radius:10px;display:block;margin-bottom:10px;border:1px solid var(--border);}
+.photo-compare-row{display:flex;gap:10px;margin-top:10px;}
+.photo-compare-col{flex:1;min-width:0;}
+
+.e1rm-note{font-size:11px;margin-top:3px;}
+
+.rest-timer-row{
+  margin-top:12px;padding-top:12px;border-top:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+}
+.rest-timer-label{display:flex;align-items:center;gap:4px;font-size:12px;}
+.rest-timer-btn{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:20px;
+  padding:5px 12px;font-size:12px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+}
+.rest-timer-active{
+  display:flex;align-items:center;gap:5px;background:rgba(198,144,46,0.15);color:var(--push);
+  border-radius:20px;padding:6px 14px;font-size:15px;font-weight:600;
+}
+.rest-timer-active.rest-timer-done{background:rgba(76,139,130,0.18);color:var(--pull);}
+.rest-timer-cancel{
+  background:none;border:none;color:var(--muted);font-size:12px;text-decoration:underline;
+  cursor:pointer;padding:0;font-family:'IBM Plex Sans',sans-serif;
+}
+
+.pr-hist-row{grid-template-columns:60px 1fr auto;}
+.pr-hist-name{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
+.pr-hist-weight{display:flex;align-items:center;gap:4px;color:var(--push);font-weight:600;}
 `;
