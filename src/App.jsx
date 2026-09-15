@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3 } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
@@ -135,6 +135,8 @@ const DEFAULT_SETTINGS = {
   goalDate: null,
   macroTargets: { Treino: { protein: 157.5, carb: 257.5 }, Descanso: { protein: 158, carb: 195 } },
   waterTarget: 8,
+  supersetLinks: {},
+  supplementList: ["Creatina", "Whey protein", "Multivitamínico"],
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -412,6 +414,21 @@ function computePRHistory(logs) {
   return prs.sort((a, b) => (a.date < b.date ? 1 : -1));
 }
 
+// Lista de dores/desconfortos marcados em exercícios — dá pra levar pro
+// fisio/médico depois se precisar mostrar um histórico.
+function computePainHistory(logs) {
+  const out = [];
+  Object.entries(logs)
+    .sort(([a], [b]) => (a < b ? 1 : -1))
+    .forEach(([d, v]) => {
+      if (!v?.exercises) return;
+      Object.entries(v.exercises).forEach(([name, ex]) => {
+        if (ex?.painNote) out.push({ date: d, name, note: ex.painNote });
+      });
+    });
+  return out;
+}
+
 // Resumo automático dos últimos 7 dias — sem precisar escolher datas, já
 // mostra treinos feitos, variação de peso e recordes batidos na semana.
 function computeWeekSummary(logs, settings, prHistory) {
@@ -510,6 +527,132 @@ function compressImageFile(file, maxDim = 900, quality = 0.6) {
     };
     img.src = url;
   });
+}
+
+// Rampa de aquecimento a partir da carga de trabalho de hoje — 3 passos a
+// 40/60/80%, arredondados pro incremento de anilha mais próximo (2,5kg), com
+// reps decrescendo conforme o peso sobe.
+function computeWarmup(workingWeight) {
+  if (!workingWeight || workingWeight <= 0) return [];
+  return [
+    { pct: 40, reps: 8 },
+    { pct: 60, reps: 5 },
+    { pct: 80, reps: 3 },
+  ].map((step) => ({
+    ...step,
+    weight: Math.max(2.5, Math.round((workingWeight * step.pct) / 100 / 2.5) * 2.5),
+  }));
+}
+
+// Sugere alimentos do banco pra fechar o que falta de proteína no dia — pega
+// os mais proteicos, calcula uma quantidade (arredondada de 10 em 10g, entre
+// 50 e 300g) que chega perto do que falta, e ordena pelo mais preciso.
+function suggestFoodsForRemaining(remaining) {
+  if (!remaining || remaining.protein < 10) return [];
+  return FOOD_DB.filter((f) => f.p >= 8)
+    .map((f) => {
+      const rawGrams = (remaining.protein / f.p) * 100;
+      const grams = Math.min(300, Math.max(50, Math.round(rawGrams / 10) * 10));
+      const macros = computeFromFood(f, grams);
+      return { food: f, grams, macros };
+    })
+    .sort((a, b) => Math.abs(a.macros.protein - remaining.protein) - Math.abs(b.macros.protein - remaining.protein))
+    .slice(0, 3);
+}
+
+// Dados pro calendário em heatmap (estilo GitHub) dos últimos N dias — uma
+// entrada por dia com o tipo de treino (se foi feito) pra colorir o quadrado.
+function buildHeatmapData(logs, settings, days = 84) {
+  const out = [];
+  const today = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(d.getDate() - i);
+    const dateStr = todayISO(d);
+    const v = logs[dateStr];
+    const dow = d.getDay();
+    const scheduled = settings.schedule[dow] || "Descanso";
+    const dt = v?.dayTypeOverride || scheduled;
+    const trained = isTrainingDay(dt) && v?.exercises && Object.keys(v.exercises).length > 0;
+    out.push({ date: dateStr, dow, dt, trained, hasAnyData: v && !isEmptyDay(v) });
+  }
+  return out;
+}
+
+// Gera um PDF de uma página com o resumo do progresso — carregado sob
+// demanda (jsPDF só entra no bundle quando o botão é clicado).
+async function generatePdfReport(logs, settings) {
+  const { jsPDF } = await import("jspdf");
+  const doc = new jsPDF({ unit: "pt", format: "a4" });
+  const marginX = 48;
+  let y = 56;
+  const lh = 18;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(18);
+  doc.text("Cutting Log — Resumo de progresso", marginX, y);
+  y += 10;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10);
+  doc.setTextColor(120);
+  y += lh;
+  doc.text(`Gerado em ${fmtDateLabel(todayISO())}`, marginX, y);
+  doc.setTextColor(20);
+  y += lh * 1.6;
+
+  function heading(text) {
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.text(text, marginX, y);
+    y += lh * 1.2;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+  }
+  function line(text) {
+    doc.text(text, marginX, y);
+    y += lh;
+  }
+
+  const bwEntries = Object.entries(logs)
+    .filter(([, v]) => v.bodyweight != null)
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  const currentWeight = bwEntries.length ? bwEntries[bwEntries.length - 1][1].bodyweight : settings.startWeight;
+
+  heading("Peso corporal");
+  line(`Inicial: ${settings.startWeight}kg   ·   Atual: ${currentWeight}kg   ·   Variação: ${(currentWeight - settings.startWeight).toFixed(1)}kg`);
+  y += lh * 0.6;
+
+  heading("Força — principais levantamentos (carga máxima atual)");
+  ANCHOR_LIFTS.forEach((name) => {
+    const last = lastInRange(logs, exerciseMaxWeightPred(name), "0000-01-01", null);
+    line(`${name}: ${last ? last.value + "kg" : "sem dados"}`);
+  });
+  y += lh * 0.6;
+
+  const goalStatus = computeGoalStatus(logs, settings.goalWeight, settings.goalDate);
+  if (goalStatus) {
+    heading("Meta de peso");
+    line(`${goalStatus.currentWeight}kg → ${goalStatus.goalWeight}kg   ·   ${GOAL_VERDICT[goalStatus.verdict].text}`);
+    y += lh * 0.6;
+  }
+
+  if ((settings.phases || []).length) {
+    heading("Fases");
+    settings.phases.forEach((phase) => {
+      const stats = computePhaseStats(logs, phase);
+      const wDelta = stats.weightStart != null && stats.weightEnd != null ? (stats.weightEnd - stats.weightStart).toFixed(1) : "—";
+      line(`${phase.name}: peso ${stats.weightStart ?? "—"}kg → ${stats.weightEnd ?? "—"}kg (${wDelta}kg)`);
+    });
+    y += lh * 0.6;
+  }
+
+  const prHistory = computePRHistory(logs).slice(0, 10);
+  if (prHistory.length) {
+    heading("Últimos recordes");
+    prHistory.forEach((pr) => line(`${fmtDateLabel(pr.date)} — ${pr.name}: ${pr.weight}kg`));
+  }
+
+  doc.save(`cutting-log-resumo-${todayISO()}.pdf`);
 }
 
 function useDebouncedSave(value, key, ready) {
@@ -969,6 +1112,11 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
       </div>
 
       <div className="card">
+        <div className="card-head">Suplementos</div>
+        <SupplementChecklist dayEntry={dayEntry} updateDay={updateDay} list={settings.supplementList} />
+      </div>
+
+      <div className="card">
         <div className="card-head">Foto do dia</div>
         <PhotoDayCard dayEntry={dayEntry} updateDay={updateDay} />
       </div>
@@ -1014,6 +1162,30 @@ function WaterCounter({ dayEntry, updateDay, target }) {
         {ml}ml de {targetMl}ml (copo de 250ml)
       </div>
     </>
+  );
+}
+
+function SupplementChecklist({ dayEntry, updateDay, list }) {
+  const taken = dayEntry.supplements || {};
+  function toggle(name) {
+    updateDay({ supplements: { ...taken, [name]: !taken[name] } });
+  }
+  if (!list || list.length === 0) {
+    return <p className="muted">Nenhum suplemento cadastrado — adicione em Configurações.</p>;
+  }
+  return (
+    <div className="supplement-list">
+      {list.map((name) => (
+        <button
+          key={name}
+          type="button"
+          className={"supplement-chip" + (taken[name] ? " active" : "")}
+          onClick={() => toggle(name)}
+        >
+          <Pill size={13} /> {name}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -1169,9 +1341,36 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
     return settings.exerciseSubstitutions[ex.id] || ex.n;
   }
 
-  function setExerciseSets(key, sets) {
-    updateDay({ exercises: { ...logged, [key]: { sets } } });
+  // Carimba início/última atividade do treino de hoje — só usado pra mostrar
+  // "durou ~Xmin" (do primeiro ao último registro), não é um cronômetro rodando.
+  function stampWorkoutActivity(patch) {
+    const now = Date.now();
+    updateDay({
+      ...patch,
+      workoutStartedAt: dayEntry.workoutStartedAt || now,
+      workoutLastActivityAt: now,
+    });
   }
+
+  function setExerciseSets(key, sets) {
+    stampWorkoutActivity({ exercises: { ...logged, [key]: { ...(logged[key] || {}), sets } } });
+  }
+
+  function setExerciseMeta(key, patch) {
+    stampWorkoutActivity({ exercises: { ...logged, [key]: { ...(logged[key] || {}), ...patch } } });
+  }
+
+  function toggleSupersetLink(id) {
+    setSettings((prev) => ({
+      ...prev,
+      supersetLinks: { ...prev.supersetLinks, [id]: !prev.supersetLinks[id] },
+    }));
+  }
+
+  const workoutMinutes =
+    dayEntry.workoutStartedAt && dayEntry.workoutLastActivityAt && dayEntry.workoutLastActivityAt > dayEntry.workoutStartedAt
+      ? Math.round((dayEntry.workoutLastActivityAt - dayEntry.workoutStartedAt) / 60000)
+      : null;
 
   function setVariation(id, variation) {
     setSettings((prev) => ({
@@ -1208,8 +1407,14 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
       <div className="section-title" style={{ color: DAY_COLOR[dayType] }}>
         {dayType} · {fmtDateLabel(selectedDate)}
       </div>
+      {workoutMinutes != null && (
+        <div className="workout-duration muted mono">
+          <Clock size={12} /> ~{workoutMinutes}min de treino (do 1º ao último registro)
+        </div>
+      )}
       {orderedExercises.map((ex, i) => {
         const key = effectiveName(ex);
+        const entry = logged[key] || {};
         return (
           <ExerciseCard
             key={ex.id}
@@ -1217,7 +1422,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             effectiveName={key}
             selectedDate={selectedDate}
             ready={ready}
-            logged={logged[key]?.sets}
+            logged={entry.sets}
             history={exerciseHistory(key)}
             onChange={(sets) => setExerciseSets(key, sets)}
             variation={settings.exerciseVariations[ex.id] || ex.variations[0]}
@@ -1228,6 +1433,13 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             onSubstitutionChange={(v) => setSubstitution(ex.id, v)}
             onMoveUp={i > 0 ? () => moveExercise(ex.id, -1) : null}
             onMoveDown={i < orderedExercises.length - 1 ? () => moveExercise(ex.id, 1) : null}
+            rirFelt={entry.rirFelt || null}
+            onRirChange={(r) => setExerciseMeta(key, { rirFelt: r })}
+            painNote={entry.painNote || ""}
+            onPainChange={(t) => setExerciseMeta(key, { painNote: t })}
+            isLinkedToNext={!!settings.supersetLinks[ex.id]}
+            onToggleLinkNext={() => toggleSupersetLink(ex.id)}
+            isLinkedFromPrev={i > 0 && !!settings.supersetLinks[orderedExercises[i - 1].id]}
           />
         );
       })}
@@ -1268,7 +1480,16 @@ function ExerciseCard({
   onSubstitutionChange,
   onMoveUp,
   onMoveDown,
+  rirFelt,
+  onRirChange,
+  painNote,
+  onPainChange,
+  isLinkedToNext,
+  onToggleLinkNext,
+  isLinkedFromPrev,
 }) {
+  const [showWarmup, setShowWarmup] = useState(false);
+  const [showPainInput, setShowPainInput] = useState(!!painNote);
   const top = topRep(plan.reps);
   // Completa com séries vazias até bater o número planejado — tanto pra quem
   // nunca registrou nada quanto pra dado antigo já salvo com menos séries do
@@ -1391,8 +1612,18 @@ function ExerciseCard({
   const currentTopSet = topSet({ sets });
   const currentE1RM = currentTopSet ? Math.round(estimate1RM(currentTopSet.w, currentTopSet.r)) : null;
 
+  // Rampa de aquecimento baseada na carga de trabalho de hoje (ou, se ainda
+  // não preencheu nada, na última sessão registrada).
+  const workingWeight = currentTopSet?.w || topSet(last)?.w || null;
+  const warmupSteps = computeWarmup(workingWeight);
+
   return (
-    <div className="card exercise-card">
+    <div className={"card exercise-card" + (isLinkedFromPrev ? " ex-linked-prev" : "")}>
+      {isLinkedFromPrev && (
+        <div className="superset-connector mono">
+          <Link2 size={11} /> continuação do superset — sem descanso antes desse
+        </div>
+      )}
       <div className="ex-order-controls">
         <button className="order-btn" onClick={onMoveUp} disabled={!onMoveUp} aria-label="Mover pra cima">
           <ChevronUp size={17} />
@@ -1445,6 +1676,13 @@ function ExerciseCard({
             {isSubstituted && <span className="sub-note"> · substituindo {plan.n}</span>}
           </div>
           {currentE1RM != null && <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg</div>}
+          <button
+            type="button"
+            className={"superset-toggle" + (isLinkedToNext ? " active" : "")}
+            onClick={onToggleLinkNext}
+          >
+            <Link2 size={11} /> {isLinkedToNext ? "Superset com o próximo ✓" : "Ligar com o próximo (superset)"}
+          </button>
         </div>
         {last && (
           <div className="ex-last-col">
@@ -1469,6 +1707,23 @@ function ExerciseCard({
             {suggestion.tone === "deload" ? <TrendingDown size={13} /> : <Flame size={13} />} {suggestion.text}
           </div>
         )
+      )}
+
+      {warmupSteps.length > 0 && (
+        <div className="warmup-block">
+          <button type="button" className="warmup-toggle" onClick={() => setShowWarmup((s) => !s)}>
+            <Flame size={12} /> Aquecimento sugerido {showWarmup ? "▲" : "▼"}
+          </button>
+          {showWarmup && (
+            <div className="warmup-steps mono">
+              {warmupSteps.map((s) => (
+                <span key={s.pct}>
+                  {s.pct}%: {s.weight}kg×{s.reps}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       <div className="set-grid">
@@ -1527,6 +1782,39 @@ function ExerciseCard({
               Cancelar
             </button>
           </>
+        )}
+      </div>
+
+      <div className="rir-felt-row">
+        <span className="muted mono rir-felt-label">RIR sentido:</span>
+        {["0", "1", "2", "3+"].map((r) => (
+          <button
+            key={r}
+            type="button"
+            className={"rir-felt-chip" + (rirFelt === r ? " active" : "")}
+            onClick={() => onRirChange(rirFelt === r ? null : r)}
+          >
+            {r}
+          </button>
+        ))}
+      </div>
+
+      <div className="pain-row">
+        <button
+          type="button"
+          className={"pain-toggle" + (painNote ? " active" : "")}
+          onClick={() => setShowPainInput((s) => !s)}
+        >
+          <AlertTriangle size={12} /> {painNote ? "Dor/desconforto registrado" : "Senti dor/desconforto aqui"}
+        </button>
+        {showPainInput && (
+          <input
+            className="input pain-input"
+            type="text"
+            placeholder="Onde doeu? (ex: ombro direito na 3ª série)"
+            value={painNote || ""}
+            onChange={(e) => onPainChange(e.target.value)}
+          />
         )}
       </div>
     </div>
@@ -1611,6 +1899,11 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay }) {
     setSettings((prev) => ({ ...prev, favoriteMeals: (prev.favoriteMeals || []).filter((f) => f.id !== id) }));
   }
 
+  const suggestions = suggestFoodsForRemaining(remaining);
+  function addSuggested(s) {
+    updateDay({ meals: [...meals, { name: `${s.food.n} (${s.grams}g)`, ...s.macros }] });
+  }
+
   return (
     <div className="stack">
       <div className="section-title">{dietCat === "Treino" ? "Meta · dia de treino" : "Meta · dia de descanso"}</div>
@@ -1627,6 +1920,30 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay }) {
           Falta: {Math.round(remaining.protein)}g P · {Math.round(remaining.carb)}g C · {Math.round(remaining.fat)}g G
         </div>
       </div>
+
+      {suggestions.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <Lightbulb size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+            Sugestão pra bater a meta
+          </div>
+          {suggestions.map((s) => (
+            <div className="meal-row" key={s.food.n}>
+              <div>
+                <div className="meal-name">
+                  {s.food.n} ({s.grams}g)
+                </div>
+                <div className="muted mono meal-macros">
+                  {Math.round(s.macros.protein)}g P · {Math.round(s.macros.carb)}g C · {Math.round(s.macros.fat)}g G
+                </div>
+              </div>
+              <button className="icon-btn favorite-add" onClick={() => addSuggested(s)} aria-label="Adicionar">
+                <Plus size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {favorites.length > 0 && (
         <div className="card">
@@ -1854,6 +2171,13 @@ function ProgressoTab({ logs, settings }) {
   const prHistory = useMemo(() => computePRHistory(logs), [logs]);
   const weekSummary = useMemo(() => computeWeekSummary(logs, settings, prHistory), [logs, settings, prHistory]);
   const muscleVolume = useMemo(() => computeMuscleVolume(logs), [logs]);
+  const painHistory = useMemo(() => computePainHistory(logs), [logs]);
+  const heatmapData = useMemo(() => buildHeatmapData(logs, settings), [logs, settings]);
+  const threeMonthsAgo = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 90);
+    return { date: todayISO(d), compare: computeDateCompare(logs, todayISO(d), todayISO()) };
+  }, [logs]);
   const bwChartRef = useRef(null);
   const strengthChartRef = useRef(null);
 
@@ -1916,6 +2240,10 @@ function ProgressoTab({ logs, settings }) {
 
       <MuscleVolumeCard data={muscleVolume} />
 
+      <HeatmapCard data={heatmapData} />
+
+      <ThreeMonthsAgoCard fromDate={threeMonthsAgo.date} result={threeMonthsAgo.compare} />
+
       {(settings.phases || []).length > 0 && <PhaseComparisonCard logs={logs} phases={settings.phases} />}
 
       <DateCompareCard logs={logs} />
@@ -1925,6 +2253,8 @@ function ProgressoTab({ logs, settings }) {
       <ExerciseProgressCard logs={logs} />
 
       <PRHistoryCard prHistory={prHistory} />
+
+      {painHistory.length > 0 && <PainHistoryCard painHistory={painHistory} />}
 
       <div className="card">
         <div className="card-head">Histórico de treino</div>
@@ -2244,6 +2574,126 @@ function DateCompareCard({ logs }) {
   );
 }
 
+function ThreeMonthsAgoCard({ fromDate, result }) {
+  const weightDelta = result.weightA != null && result.weightB != null ? result.weightB - result.weightA : null;
+  const hasAnything = weightDelta != null || result.lifts.some((l) => l.a != null && l.b != null);
+  if (!hasAnything) return null;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <History size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+        Você, 3 meses atrás
+      </div>
+      <p className="muted export-hint">Comparação automática com {fmtDateLabel(fromDate)} — sem precisar escolher a data.</p>
+      <div className="phase-card">
+        <div className="phase-stat-row">
+          <span className="muted">Peso corporal</span>
+          {weightDelta != null ? (
+            <span className="mono">
+              {result.weightA}kg → {result.weightB}kg{" "}
+              <span className={weightDelta <= 0 ? "tone-down" : "tone-up"}>
+                ({weightDelta > 0 ? "+" : ""}
+                {weightDelta.toFixed(1)}kg)
+              </span>
+            </span>
+          ) : (
+            <span className="muted mono">sem dados suficientes</span>
+          )}
+        </div>
+        {result.lifts.map((lift) => {
+          const liftDelta = lift.a != null && lift.b != null ? lift.b - lift.a : null;
+          const pct = liftDelta != null && lift.a > 0 ? Math.round((liftDelta / lift.a) * 100) : null;
+          return (
+            <div className="phase-stat-row" key={lift.name}>
+              <span className="muted">{lift.name}</span>
+              {liftDelta != null ? (
+                <span className="mono">
+                  {lift.a}kg → {lift.b}kg{" "}
+                  <span className={liftDelta >= 0 ? "tone-down" : "tone-up"}>
+                    ({pct > 0 ? "+" : ""}
+                    {pct}%)
+                  </span>
+                </span>
+              ) : (
+                <span className="muted mono">sem dados suficientes</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function HeatmapCard({ data }) {
+  // Agrupa em semanas (colunas), domingo a sábado (linhas) — igual ao
+  // contribution graph do GitHub, só que colorido pelo tipo de treino.
+  const weeks = [];
+  let currentWeek = new Array(data[0]?.dow ?? 0).fill(null);
+  data.forEach((day) => {
+    currentWeek.push(day);
+    if (currentWeek.length === 7) {
+      weeks.push(currentWeek);
+      currentWeek = [];
+    }
+  });
+  if (currentWeek.length) {
+    while (currentWeek.length < 7) currentWeek.push(null);
+    weeks.push(currentWeek);
+  }
+  return (
+    <div className="card">
+      <div className="card-head">Calendário de treinos</div>
+      <div className="heatmap-grid">
+        {weeks.map((week, wi) => (
+          <div className="heatmap-col" key={wi}>
+            {week.map((day, di) =>
+              day ? (
+                <div
+                  key={di}
+                  className="heatmap-cell"
+                  title={`${fmtDateLabel(day.date)} — ${day.trained ? day.dt : day.hasAnyData ? "sem treino" : "sem registro"}`}
+                  style={{
+                    background: day.trained ? DAY_COLOR[day.dt] : day.hasAnyData ? "var(--surface-2)" : "var(--border)",
+                    opacity: day.trained ? 1 : day.hasAnyData ? 0.7 : 0.35,
+                  }}
+                />
+              ) : (
+                <div key={di} className="heatmap-cell heatmap-cell-empty" />
+              )
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="hint" style={{ marginBottom: 0 }}>
+        Cada coluna é uma semana (domingo em cima) · cor forte = treino feito, cor fraca = dia sem registro.
+      </p>
+    </div>
+  );
+}
+
+function PainHistoryCard({ painHistory }) {
+  const top = painHistory.slice(0, 10);
+  return (
+    <div className="card">
+      <div className="card-head">
+        <AlertTriangle size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+        Dor/desconforto registrado
+      </div>
+      {top.map((p, i) => (
+        <div className="meal-row" key={p.date + p.name + i}>
+          <div className="favorite-info">
+            <div className="meal-name">{p.name}</div>
+            <div className="muted mono meal-macros">
+              {fmtDateLabel(p.date)} — {p.note}
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 const ALL_EXERCISES = [...PLAN.Push, ...PLAN.Pull, ...PLAN.Legs].map((e) => e.n);
 
 function ExerciseProgressCard({ logs }) {
@@ -2529,6 +2979,8 @@ function SettingsSheet({
 }) {
   const [local, setLocal] = useState(settings);
   const [newPhase, setNewPhase] = useState({ name: "", start: "", end: "" });
+  const [newSupplement, setNewSupplement] = useState("");
+  const [pdfBusy, setPdfBusy] = useState(false);
 
   const storage = useMemo(() => {
     const logsBytes = new Blob([JSON.stringify(logs)]).size;
@@ -2671,6 +3123,46 @@ function SettingsSheet({
               value={local.waterTarget}
               onChange={(e) => setLocal({ ...local, waterTarget: parseInt(e.target.value, 10) || 0 })}
             />
+          </div>
+          <div className="card">
+            <div className="card-head">Suplementos</div>
+            {(local.supplementList || []).map((name) => (
+              <div className="meal-row" key={name}>
+                <div className="meal-name">{name}</div>
+                <button
+                  className="icon-btn"
+                  onClick={() =>
+                    setLocal((prev) => ({ ...prev, supplementList: prev.supplementList.filter((n) => n !== name) }))
+                  }
+                  aria-label="Remover suplemento"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+            <input
+              className="input"
+              placeholder="Nome do suplemento (ex: Ômega 3)"
+              value={newSupplement}
+              onChange={(e) => setNewSupplement(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && newSupplement.trim()) {
+                  setLocal((prev) => ({ ...prev, supplementList: [...(prev.supplementList || []), newSupplement.trim()] }));
+                  setNewSupplement("");
+                }
+              }}
+              style={{ marginTop: (local.supplementList || []).length ? 10 : 0 }}
+            />
+            <button
+              className="btn-secondary"
+              disabled={!newSupplement.trim()}
+              onClick={() => {
+                setLocal((prev) => ({ ...prev, supplementList: [...(prev.supplementList || []), newSupplement.trim()] }));
+                setNewSupplement("");
+              }}
+            >
+              <Plus size={15} /> Adicionar suplemento
+            </button>
           </div>
           <div className="card">
             <div className="card-head">Meta de gordura (g/dia)</div>
@@ -2824,6 +3316,22 @@ function SettingsSheet({
             </button>
             <button className="btn-secondary" onClick={() => exportJSON(logs, settings)}>
               <Download size={15} /> Exportar backup completo (JSON)
+            </button>
+            <button
+              className="btn-secondary"
+              disabled={pdfBusy}
+              onClick={async () => {
+                setPdfBusy(true);
+                try {
+                  await generatePdfReport(logs, settings);
+                } catch (e) {
+                  console.error("pdf export failed", e);
+                } finally {
+                  setPdfBusy(false);
+                }
+              }}
+            >
+              <FileText size={15} /> {pdfBusy ? "Gerando…" : "Exportar resumo em PDF"}
             </button>
           </div>
           <button
@@ -3309,4 +3817,58 @@ button:active:not(:disabled){transform:scale(0.96);}
 .pr-hist-row{grid-template-columns:60px 1fr auto;}
 .pr-hist-name{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
 .pr-hist-weight{display:flex;align-items:center;gap:4px;color:var(--push);font-weight:600;}
+
+.superset-connector{
+  display:flex;align-items:center;gap:5px;color:var(--upper);font-size:10.5px;
+  margin:-14px -14px 10px;padding:6px 14px;background:rgba(91,122,153,0.12);border-bottom:1px solid var(--border);
+  border-radius:12px 12px 0 0;
+}
+.ex-linked-prev{margin-top:-6px;}
+.superset-toggle{
+  background:none;border:none;color:var(--muted);font-size:10.5px;display:flex;align-items:center;gap:4px;
+  cursor:pointer;padding:4px 0 0;font-family:'IBM Plex Sans',sans-serif;
+}
+.superset-toggle.active{color:var(--upper);}
+
+.warmup-block{margin-top:10px;}
+.warmup-toggle{
+  background:none;border:none;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:5px;
+  cursor:pointer;padding:0;font-family:'IBM Plex Sans',sans-serif;
+}
+.warmup-steps{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;font-size:12px;color:var(--text);}
+.warmup-steps span{background:var(--surface-2);border:1px solid var(--border);border-radius:7px;padding:4px 8px;}
+
+.workout-duration{display:flex;align-items:center;gap:5px;font-size:12px;margin-top:-6px;}
+
+.rir-felt-row{
+  margin-top:12px;padding-top:12px;border-top:1px solid var(--border);
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+}
+.rir-felt-label{font-size:11.5px;}
+.rir-felt-chip{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:20px;
+  width:30px;height:30px;font-size:12px;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;
+}
+.rir-felt-chip.active{color:#1E1A16;background:var(--push);border-color:var(--push);font-weight:600;}
+
+.pain-row{margin-top:10px;}
+.pain-toggle{
+  background:none;border:none;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:5px;
+  cursor:pointer;padding:0;font-family:'IBM Plex Sans',sans-serif;
+}
+.pain-toggle.active{color:var(--legs);}
+.pain-input{margin-top:8px;}
+
+.supplement-list{display:flex;flex-wrap:wrap;gap:8px;}
+.supplement-chip{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--muted);border-radius:20px;
+  padding:8px 14px;font-size:12.5px;display:flex;align-items:center;gap:6px;cursor:pointer;
+  font-family:'IBM Plex Sans',sans-serif;
+}
+.supplement-chip.active{color:var(--pull);border-color:var(--pull);background:rgba(76,139,130,0.12);}
+
+.heatmap-grid{display:flex;gap:3px;overflow-x:auto;padding-bottom:4px;}
+.heatmap-col{display:flex;flex-direction:column;gap:3px;flex-shrink:0;}
+.heatmap-cell{width:11px;height:11px;border-radius:2.5px;}
+.heatmap-cell-empty{background:transparent;}
 `;
