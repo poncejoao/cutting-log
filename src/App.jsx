@@ -138,6 +138,9 @@ const DEFAULT_SETTINGS = {
   waterTarget: 8,
   supersetLinks: {},
   supplementList: ["Creatina", "Whey protein", "Multivitamínico"],
+  notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true },
+  notificationTimes: { treino: 12, peso: 9, sync: 20, agua: 15 },
+  customTemplates: [],
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -195,8 +198,28 @@ const fmtDateLabel = (iso) => {
   return `${WEEKDAY_LABEL[d.getDay()]} ${d.getDate()}/${d.getMonth() + 1}`;
 };
 const topRep = (range) => parseInt(range.split("-").pop(), 10);
-const isTrainingDay = (dayType) => dayType === "Push" || dayType === "Pull" || dayType === "Legs" || dayType === "Upper" || dayType === "Lower";
+// Qualquer tipo de dia que não seja "Descanso" conta como treino — inclui os
+// 5 fixos (Push/Pull/Legs/Upper/Lower) e qualquer template personalizado
+// criado pelo usuário (que nunca se chama "Descanso").
+const isTrainingDay = (dayType) => dayType !== "Descanso";
 const ALL_DAY_TYPES = ["Push", "Pull", "Legs", "Upper", "Lower", "Descanso"];
+// Paleta de reserva pros templates personalizados — escolhida por um hash
+// simples do nome, pra cada template ter uma cor estável e distinta sem o
+// usuário precisar escolher uma.
+const CUSTOM_COLOR_PALETTE = ["var(--push)", "var(--pull)", "var(--legs)", "var(--upper)", "var(--lower)"];
+function getDayColor(dayType) {
+  if (DAY_COLOR[dayType]) return DAY_COLOR[dayType];
+  let hash = 0;
+  for (let i = 0; i < dayType.length; i++) hash = (hash * 31 + dayType.charCodeAt(i)) >>> 0;
+  return CUSTOM_COLOR_PALETTE[hash % CUSTOM_COLOR_PALETTE.length];
+}
+// Exercícios de um dia — dos 5 tipos fixos (PLAN) ou de um template
+// personalizado salvo em settings.customTemplates.
+function getPlanExercises(dayType, settings) {
+  if (PLAN[dayType]) return PLAN[dayType];
+  const custom = (settings.customTemplates || []).find((t) => t.name === dayType);
+  return custom ? custom.exercises : [];
+}
 const kcal = (p, c, f) => Math.round(p * 4 + c * 4 + f * 9);
 const computeFromFood = (food, g) => ({
   protein: (food.p * g) / 100,
@@ -458,6 +481,62 @@ function computeWeekSummary(logs, settings, prHistory) {
   };
 }
 
+// Igual ao resumo semanal, só que numa janela de 30 dias — visão mais larga
+// sem precisar escolher datas.
+function computeMonthSummary(logs, settings, prHistory) {
+  const to = todayISO();
+  const fromD = new Date();
+  fromD.setDate(fromD.getDate() - 29);
+  const from = todayISO(fromD);
+  let workouts = 0;
+  Object.entries(logs).forEach(([d, v]) => {
+    if (d < from || d > to) return;
+    const dow = new Date(d + "T12:00:00").getDay();
+    const scheduled = settings.schedule[dow] || "Descanso";
+    const dt = v.dayTypeOverride || scheduled;
+    if (isTrainingDay(dt) && v.exercises && Object.keys(v.exercises).length > 0) workouts++;
+  });
+  const wStart = firstInRange(logs, bodyweightPred, from, to);
+  const wEnd = lastInRange(logs, bodyweightPred, from, to);
+  const prsThisMonth = prHistory.filter((p) => p.date >= from && p.date <= to);
+  return {
+    from,
+    to,
+    workouts,
+    weightStart: wStart?.value ?? null,
+    weightEnd: wEnd?.value ?? null,
+    prCount: prsThisMonth.length,
+  };
+}
+
+// Volume total (peso × reps de todos os exercícios) de cada sessão de
+// treino, agrupado por dia da semana — pra achar um padrão tipo "segunda
+// costuma ser mais forte". Exige pelo menos 2 sessões naquele dia da semana
+// pra entrar na comparação (uma sessão isolada não é padrão).
+function computeWeekdayPattern(logs) {
+  const buckets = Array.from({ length: 7 }, () => []);
+  Object.entries(logs).forEach(([d, v]) => {
+    if (!v?.exercises) return;
+    const vol = Object.values(v.exercises).reduce((sum, ex) => {
+      if (!ex?.sets?.length) return sum;
+      return sum + ex.sets.reduce((s2, s) => s2 + (parseFloat(s.weight) || 0) * (parseInt(s.reps, 10) || 0), 0);
+    }, 0);
+    if (vol <= 0) return;
+    const dow = new Date(d + "T12:00:00").getDay();
+    buckets[dow].push(vol);
+  });
+  const averages = buckets.map((vols, dow) => ({
+    dow,
+    label: WEEKDAY_LABEL[dow],
+    avg: vols.length ? vols.reduce((a, b) => a + b, 0) / vols.length : 0,
+    count: vols.length,
+  }));
+  const withEnough = averages.filter((a) => a.count >= 2);
+  if (withEnough.length < 2) return null;
+  const sorted = [...withEnough].sort((a, b) => b.avg - a.avg);
+  return { averages, strongest: sorted[0], weakest: sorted[sorted.length - 1] };
+}
+
 // Volume (peso × reps somado) dos últimos 7 dias, agrupado por grupo
 // muscular — pra notar se algum grupo ficou de fora na semana.
 function computeMuscleVolume(logs) {
@@ -656,6 +735,57 @@ async function generatePdfReport(logs, settings) {
   doc.save(`cutting-log-resumo-${todayISO()}.pdf`);
 }
 
+// Mantém a tela acesa enquanto `active` for true (Wake Lock API) — o
+// navegador libera o lock sozinho quando a aba fica em background, então
+// reconquista automaticamente quando ela volta a ficar visível.
+function useWakeLock(active) {
+  const lockRef = useRef(null);
+  const supported = typeof navigator !== "undefined" && "wakeLock" in navigator;
+
+  useEffect(() => {
+    if (!supported) return;
+    let cancelled = false;
+    async function acquire() {
+      try {
+        const lock = await navigator.wakeLock.request("screen");
+        if (cancelled) {
+          lock.release().catch(() => {});
+          return;
+        }
+        lockRef.current = lock;
+      } catch (e) {
+        // pode falhar se a aba não estiver visível — sem problema, tenta de
+        // novo no próximo visibilitychange
+      }
+    }
+    async function release() {
+      if (lockRef.current) {
+        try {
+          await lockRef.current.release();
+        } catch (e) {}
+        lockRef.current = null;
+      }
+    }
+    if (active) {
+      acquire();
+      const onVisible = () => {
+        if (document.visibilityState === "visible" && active && !lockRef.current) acquire();
+      };
+      document.addEventListener("visibilitychange", onVisible);
+      return () => {
+        cancelled = true;
+        document.removeEventListener("visibilitychange", onVisible);
+        release();
+      };
+    } else {
+      release();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
+  return supported;
+}
+
 function useDebouncedSave(value, key, ready) {
   const timer = useRef(null);
   const latest = useRef(value);
@@ -732,6 +862,16 @@ export default function App() {
     return raw ? Number(raw) : null;
   });
   const pulledFromCloud = useRef(false);
+
+  // Toast de "desfazer" — usado por ações de apagar que são fáceis de tocar
+  // sem querer (remover refeição, remover foto). Some sozinho em 5s.
+  const [undoToast, setUndoToast] = useState(null); // {message, onUndo}
+  const undoTimerRef = useRef(null);
+  function showUndo(message, onUndo) {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    setUndoToast({ message, onUndo });
+    undoTimerRef.current = setTimeout(() => setUndoToast(null), 5000);
+  }
 
   useEffect(() => {
     (async () => {
@@ -878,7 +1018,7 @@ export default function App() {
       <style>{CSS}</style>
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" style={{ background: DAY_COLOR[dayType] }} />
+          <span className="brand-mark" style={{ background: getDayColor(dayType) }} />
           <div>
             <div className="brand-title">Cutting Log</div>
             <div className="brand-sub">João Gabriel · PPL</div>
@@ -921,6 +1061,7 @@ export default function App() {
             updateDay={updateDay}
             setTab={setTab}
             ready={ready}
+            showUndo={showUndo}
           />
         )}
         {tab === "treino" && (
@@ -937,10 +1078,34 @@ export default function App() {
           />
         )}
         {tab === "dieta" && (
-          <DietaTab dietCat={dietCat} settings={settings} setSettings={setSettings} dayEntry={dayEntry} updateDay={updateDay} />
+          <DietaTab
+            dietCat={dietCat}
+            settings={settings}
+            setSettings={setSettings}
+            dayEntry={dayEntry}
+            updateDay={updateDay}
+            logs={logs}
+            selectedDate={selectedDate}
+            showUndo={showUndo}
+          />
         )}
         {tab === "progresso" && <ProgressoTab logs={logs} settings={settings} />}
       </main>
+
+      {undoToast && (
+        <div className="undo-toast">
+          <span>{undoToast.message}</span>
+          <button
+            onClick={() => {
+              undoToast.onUndo();
+              setUndoToast(null);
+              if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+            }}
+          >
+            Desfazer
+          </button>
+        </div>
+      )}
 
       <nav className="tabbar">
         <TabBtn icon={Home} label="Hoje" active={tab === "hoje"} onClick={() => setTab("hoje")} />
@@ -977,7 +1142,7 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 // ---------------- Hoje ----------------
-function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready }) {
+function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready, showUndo }) {
   const [switching, setSwitching] = useState(false);
   const training = isTrainingDay(dayType);
   const target = settings.macroTargets[dietCat];
@@ -990,7 +1155,8 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
   );
   const gotKcal = kcal(got.protein, got.carb, got.fat);
   const exercisesDone = dayEntry.exercises ? Object.keys(dayEntry.exercises).length : 0;
-  const exercisesTotal = training ? PLAN[dayType].length : 0;
+  const exercisesTotal = training ? getPlanExercises(dayType, settings).length : 0;
+  const dayOptions = [...ALL_DAY_TYPES.slice(0, -1), ...(settings.customTemplates || []).map((t) => t.name), "Descanso"];
 
   const isToday = selectedDate === todayISO();
   const hour = new Date().getHours();
@@ -1035,9 +1201,9 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
         </button>
       </div>
 
-      <div className="hero-card" style={{ borderColor: DAY_COLOR[dayType] }}>
+      <div className="hero-card" style={{ borderColor: getDayColor(dayType) }}>
         <div className="hero-head-row">
-          <div className="hero-eyebrow" style={{ color: DAY_COLOR[dayType] }}>
+          <div className="hero-eyebrow" style={{ color: getDayColor(dayType) }}>
             {dietCat === "Treino" ? "Dia de treino" : "Dia de descanso"}
           </div>
           <button className="hero-switch-btn" onClick={() => setSwitching((s) => !s)}>
@@ -1055,14 +1221,14 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
         )}
         {switching && (
           <div className="day-switch-row">
-            {ALL_DAY_TYPES.map((dt) => (
+            {dayOptions.map((dt) => (
               <button
                 key={dt}
                 className={"day-switch-chip" + (dt === dayType ? " active" : "")}
                 style={
                   dt === dayType
-                    ? { borderColor: DAY_COLOR[dt], background: DAY_COLOR[dt], color: "#1E1A16" }
-                    : { borderColor: DAY_COLOR[dt], color: DAY_COLOR[dt] }
+                    ? { borderColor: getDayColor(dt), background: getDayColor(dt), color: "#1E1A16" }
+                    : { borderColor: getDayColor(dt), color: getDayColor(dt) }
                 }
                 onClick={() => {
                   updateDay({ dayTypeOverride: dt === scheduledType ? null : dt });
@@ -1108,6 +1274,11 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
       </div>
 
       <div className="card">
+        <div className="card-head">Medidas corporais</div>
+        <MeasurementsForm dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} ready={ready} />
+      </div>
+
+      <div className="card">
         <div className="card-head">Hidratação</div>
         <WaterCounter dayEntry={dayEntry} updateDay={updateDay} target={settings.waterTarget} />
       </div>
@@ -1119,13 +1290,68 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
 
       <div className="card">
         <div className="card-head">Foto do dia</div>
-        <PhotoDayCard dayEntry={dayEntry} updateDay={updateDay} />
+        <PhotoDayCard dayEntry={dayEntry} updateDay={updateDay} showUndo={showUndo} />
       </div>
 
       <div className="card">
         <div className="card-head">Notas do dia</div>
         <DayNoteField dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} ready={ready} />
       </div>
+    </div>
+  );
+}
+
+const MEASUREMENT_FIELDS = [
+  { key: "waist", label: "Cintura" },
+  { key: "arm", label: "Braço" },
+  { key: "chest", label: "Peito" },
+  { key: "thigh", label: "Coxa" },
+];
+
+function MeasurementsForm({ dayEntry, updateDay, selectedDate, ready }) {
+  const [open, setOpen] = useState(!!dayEntry.measurements);
+  const [vals, setVals] = useState(() => dayEntry.measurements || {});
+
+  useEffect(() => {
+    setVals(dayEntry.measurements || {});
+    setOpen(!!dayEntry.measurements);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, ready]);
+
+  function setField(key, raw) {
+    const v = sanitizeDecimal(raw);
+    const next = { ...vals, [key]: v };
+    setVals(next);
+    const cleaned = {};
+    Object.entries(next).forEach(([k, val]) => {
+      if (val !== "") cleaned[k] = parseFloat(val);
+    });
+    updateDay({ measurements: Object.keys(cleaned).length ? cleaned : null });
+  }
+
+  if (!open) {
+    return (
+      <button className="btn-secondary" onClick={() => setOpen(true)}>
+        <Plus size={15} /> Adicionar medidas hoje
+      </button>
+    );
+  }
+
+  return (
+    <div className="macro-inputs" style={{ gridTemplateColumns: "1fr 1fr", margin: 0 }}>
+      {MEASUREMENT_FIELDS.map((f) => (
+        <div className="schedule-row" key={f.key}>
+          <span>{f.label}</span>
+          <input
+            className="input mono settings-input"
+            type="text"
+            inputMode="decimal"
+            placeholder="cm"
+            value={vals[f.key] ?? ""}
+            onChange={(e) => setField(f.key, e.target.value)}
+          />
+        </div>
+      ))}
     </div>
   );
 }
@@ -1190,7 +1416,7 @@ function SupplementChecklist({ dayEntry, updateDay, list }) {
   );
 }
 
-function PhotoDayCard({ dayEntry, updateDay }) {
+function PhotoDayCard({ dayEntry, updateDay, showUndo }) {
   const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
 
@@ -1213,7 +1439,14 @@ function PhotoDayCard({ dayEntry, updateDay }) {
     return (
       <>
         <img src={dayEntry.photo} alt="Foto do dia" className="progress-photo" />
-        <button className="btn-secondary" onClick={() => updateDay({ photo: null })}>
+        <button
+          className="btn-secondary"
+          onClick={() => {
+            const removed = dayEntry.photo;
+            updateDay({ photo: null });
+            showUndo?.("Foto removida", () => updateDay({ photo: removed }));
+          }}
+        >
           <Trash2 size={15} /> Remover foto
         </button>
       </>
@@ -1308,6 +1541,9 @@ function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate, re
 // ---------------- Treino ----------------
 function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate, settings, setSettings, onSaveNow, ready }) {
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
+  const [shareMsg, setShareMsg] = useState("");
+  const [wakeLockOn, setWakeLockOn] = useState(false);
+  const wakeLockSupported = useWakeLock(wakeLockOn && isTrainingDay(dayType));
   async function handleSaveNow() {
     setSaveState("saving");
     try {
@@ -1330,7 +1566,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
       </div>
     );
   }
-  const planExercises = PLAN[dayType];
+  const planExercises = getPlanExercises(dayType, settings);
   const order = settings.exerciseOrder[dayType] || planExercises.map((e) => e.id);
   // garante que ids novos (ou fora de ordem salva) apareçam também
   const fullOrder = [...order, ...planExercises.map((e) => e.id).filter((id) => !order.includes(id))];
@@ -1373,6 +1609,29 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
       ? Math.round((dayEntry.workoutLastActivityAt - dayEntry.workoutStartedAt) / 60000)
       : null;
 
+  // Resuminho em texto pra colar no WhatsApp/grupo — só os exercícios que já
+  // têm alguma série preenchida hoje.
+  async function shareWorkoutText() {
+    const lines = [`${dayType} · ${fmtDateLabel(selectedDate)}`, ""];
+    Object.entries(logged).forEach(([name, ex]) => {
+      if (!ex?.sets?.length) return;
+      lines.push(`${name}: ${ex.sets.map((s) => `${s.weight || "—"}×${s.reps || "—"}`).join(", ")}`);
+    });
+    if (dayEntry.bodyweight != null) lines.push("", `Peso: ${dayEntry.bodyweight}kg`);
+    const text = lines.join("\n");
+    if (navigator.share) {
+      try {
+        await navigator.share({ text, title: "Cutting Log" });
+      } catch (e) {
+        // usuário cancelou — não é erro
+      }
+    } else if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      setShareMsg("Copiado!");
+      setTimeout(() => setShareMsg(""), 2000);
+    }
+  }
+
   function setVariation(id, variation) {
     setSettings((prev) => ({
       ...prev,
@@ -1405,7 +1664,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
 
   return (
     <div className="stack">
-      <div className="section-title" style={{ color: DAY_COLOR[dayType] }}>
+      <div className="section-title" style={{ color: getDayColor(dayType) }}>
         {dayType} · {fmtDateLabel(selectedDate)}
       </div>
       {workoutMinutes != null && (
@@ -1413,6 +1672,20 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
           <Clock size={12} /> ~{workoutMinutes}min de treino (do 1º ao último registro)
         </div>
       )}
+      <div className="treino-toolbar">
+        {wakeLockSupported && (
+          <button
+            type="button"
+            className={"treino-toolbar-btn" + (wakeLockOn ? " active" : "")}
+            onClick={() => setWakeLockOn((s) => !s)}
+          >
+            {wakeLockOn ? "🔆" : "🔅"} Tela acesa
+          </button>
+        )}
+        <button type="button" className="treino-toolbar-btn" onClick={shareWorkoutText}>
+          <Share2 size={13} /> {shareMsg || "Compartilhar treino"}
+        </button>
+      </div>
       {orderedExercises.map((ex, i) => {
         const key = effectiveName(ex);
         const entry = logged[key] || {};
@@ -1643,13 +1916,13 @@ function ExerciseCard({
               onChange={(e) => onSubstitutionChange(e.target.value)}
             >
               <option value={plan.n}>{plan.n}</option>
-              {plan.equivalents.map((eq) => (
+              {(plan.equivalents || []).map((eq) => (
                 <option key={eq} value={eq}>
                   {eq}
                 </option>
               ))}
             </select>
-            {!isSubstituted && (
+            {!isSubstituted && plan.variations?.length > 0 && (
               <select
                 className="variation-chip"
                 value={variation}
@@ -1673,10 +1946,10 @@ function ExerciseCard({
             )}
           </div>
           <div className="ex-meta mono">
-            {plan.sets}× {plan.reps} reps · RIR {plan.rir}
+            {plan.sets}× {plan.reps} reps{plan.rir ? ` · RIR ${plan.rir}` : ""}
             {isSubstituted && <span className="sub-note"> · substituindo {plan.n}</span>}
           </div>
-          {currentE1RM != null && <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg</div>}
+          {currentE1RM > 0 && <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg</div>}
           <button
             type="button"
             className={"superset-toggle" + (isLinkedToNext ? " active" : "")}
@@ -1823,7 +2096,7 @@ function ExerciseCard({
 }
 
 // ---------------- Dieta ----------------
-function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay }) {
+function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, selectedDate, showUndo }) {
   const target = settings.macroTargets[dietCat];
   const fatTarget = dietCat === "Treino" ? settings.fatTraining : settings.fatRest;
   const targetKcal = kcal(target.protein, target.carb, fatTarget);
@@ -1867,7 +2140,18 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay }) {
   }
 
   function removeMeal(idx) {
+    const previousMeals = meals;
     updateDay({ meals: meals.filter((_, i) => i !== idx) });
+    showUndo?.("Refeição removida", () => updateDay({ meals: previousMeals }));
+  }
+
+  // "Clonar refeições de ontem" — só aparece quando hoje ainda não tem
+  // nenhuma refeição registrada, pra nunca sobrescrever o que já foi digitado.
+  const yesterday = todayISO(new Date(new Date(selectedDate + "T12:00:00").getTime() - 86400000));
+  const yesterdayMeals = logs?.[yesterday]?.meals || [];
+  function cloneYesterdayMeals() {
+    if (meals.length > 0 || yesterdayMeals.length === 0) return;
+    updateDay({ meals: yesterdayMeals.map((m) => ({ ...m })) });
   }
 
   const favorites = settings.favoriteMeals || [];
@@ -1920,6 +2204,11 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay }) {
         <div className="remaining mono muted">
           Falta: {Math.round(remaining.protein)}g P · {Math.round(remaining.carb)}g C · {Math.round(remaining.fat)}g G
         </div>
+        {meals.length === 0 && yesterdayMeals.length > 0 && (
+          <button className="btn-secondary" onClick={cloneYesterdayMeals}>
+            <Repeat size={15} /> Clonar refeições de ontem
+          </button>
+        )}
       </div>
 
       {suggestions.length > 0 && (
@@ -2171,6 +2460,8 @@ function ProgressoTab({ logs, settings }) {
   );
   const prHistory = useMemo(() => computePRHistory(logs), [logs]);
   const weekSummary = useMemo(() => computeWeekSummary(logs, settings, prHistory), [logs, settings, prHistory]);
+  const monthSummary = useMemo(() => computeMonthSummary(logs, settings, prHistory), [logs, settings, prHistory]);
+  const weekdayPattern = useMemo(() => computeWeekdayPattern(logs), [logs]);
   const muscleVolume = useMemo(() => computeMuscleVolume(logs), [logs]);
   const painHistory = useMemo(() => computePainHistory(logs), [logs]);
   const heatmapData = useMemo(() => buildHeatmapData(logs, settings), [logs, settings]);
@@ -2185,6 +2476,8 @@ function ProgressoTab({ logs, settings }) {
   return (
     <div className="stack">
       <WeekSummaryCard summary={weekSummary} />
+
+      <MonthSummaryCard summary={monthSummary} />
 
       {goalStatus && <GoalStatusCard status={goalStatus} />}
 
@@ -2241,6 +2534,8 @@ function ProgressoTab({ logs, settings }) {
 
       <MuscleVolumeCard data={muscleVolume} />
 
+      {weekdayPattern && <WeekdayPatternCard pattern={weekdayPattern} />}
+
       <HeatmapCard data={heatmapData} />
 
       <ThreeMonthsAgoCard fromDate={threeMonthsAgo.date} result={threeMonthsAgo.compare} />
@@ -2250,6 +2545,8 @@ function ProgressoTab({ logs, settings }) {
       <DateCompareCard logs={logs} />
 
       <PhotoCompareCard logs={logs} />
+
+      <MeasurementsProgressCard logs={logs} />
 
       <ExerciseProgressCard logs={logs} />
 
@@ -2271,13 +2568,13 @@ function ProgressoTab({ logs, settings }) {
               <span className="hist-date">{fmtDateLabel(d)}</span>
               <span
                 className="hist-tag"
-                style={{ color: DAY_COLOR[dt] }}
+                style={{ color: getDayColor(dt) }}
                 title={wasSwapped ? `Agendado: ${scheduled} · trocado pra ${dt}` : undefined}
               >
                 {dt}
                 {wasSwapped && <span className="hist-swap-dot">●</span>}
               </span>
-              <span className="muted mono">{isTrainingDay(dt) ? `${exCount}/${PLAN[dt]?.length || 0} ex` : "—"}</span>
+              <span className="muted mono">{isTrainingDay(dt) ? `${exCount}/${getPlanExercises(dt, settings).length} ex` : "—"}</span>
               <span className="muted mono">{v.bodyweight ? `${v.bodyweight}kg` : ""}</span>
             </div>
           );
@@ -2321,6 +2618,74 @@ function WeekSummaryCard({ summary }) {
       <div className="hint" style={{ marginBottom: 0 }}>
         Últimos 7 dias, atualizado automaticamente.
       </div>
+    </div>
+  );
+}
+
+function MonthSummaryCard({ summary }) {
+  const weightDelta =
+    summary.weightStart != null && summary.weightEnd != null ? summary.weightEnd - summary.weightStart : null;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <BarChart3 size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+        Resumo do mês (30 dias)
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Treinos feitos</span>
+        <span className="mono">{summary.workouts}</span>
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Peso corporal</span>
+        {weightDelta != null ? (
+          <span className="mono">
+            {summary.weightStart}kg → {summary.weightEnd}kg{" "}
+            <span className={weightDelta <= 0 ? "tone-down" : "tone-up"}>
+              ({weightDelta > 0 ? "+" : ""}
+              {weightDelta.toFixed(1)}kg)
+            </span>
+          </span>
+        ) : (
+          <span className="muted mono">sem dados suficientes</span>
+        )}
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Recordes batidos</span>
+        <span className="mono">{summary.prCount}</span>
+      </div>
+    </div>
+  );
+}
+
+function WeekdayPatternCard({ pattern }) {
+  const maxAvg = Math.max(...pattern.averages.map((a) => a.avg), 1);
+  return (
+    <div className="card">
+      <div className="card-head">Padrão por dia da semana</div>
+      <p className="muted export-hint">
+        {pattern.strongest.label !== pattern.weakest.label ? (
+          <>
+            Suas sessões de <strong className="cloud-email">{pattern.strongest.label}</strong> costumam ser as mais
+            fortes · <strong className="cloud-email">{pattern.weakest.label}</strong> as mais fracas (volume médio de
+            treino).
+          </>
+        ) : (
+          "Ainda não há diferença clara entre os dias da semana."
+        )}
+      </p>
+      {pattern.averages
+        .filter((a) => a.count > 0)
+        .map((a) => (
+          <div className="macro-row" key={a.dow}>
+            <div className="macro-labels">
+              <span>{a.label}</span>
+              <span className="mono muted">{a.count} sessão(ões)</span>
+            </div>
+            <div className="bar-track">
+              <div className="bar-fill" style={{ width: (a.avg / maxAvg) * 100 + "%", background: "var(--upper)" }} />
+            </div>
+          </div>
+        ))}
     </div>
   );
 }
@@ -2400,6 +2765,61 @@ function PhotoCompareCard({ logs }) {
             {photoB ? <img src={photoB} alt={dateB} className="progress-photo" /> : dateB && <p className="muted export-hint">Sem foto nesse dia.</p>}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function MeasurementsProgressCard({ logs }) {
+  const [field, setField] = useState("waist");
+  const chartRef = useRef(null);
+
+  const data = useMemo(() => {
+    return Object.entries(logs)
+      .filter(([, v]) => v?.measurements?.[field] != null)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([d, v]) => ({ date: d.slice(5), valor: v.measurements[field] }));
+  }, [logs, field]);
+
+  const first = data[0]?.valor;
+  const last = data[data.length - 1]?.valor;
+  const delta = first != null && last != null ? last - first : null;
+
+  const hasAny = MEASUREMENT_FIELDS.some((f) => Object.values(logs).some((v) => v?.measurements?.[f.key] != null));
+  if (!hasAny) return null;
+
+  return (
+    <div className="card">
+      <div className="card-head">Medidas corporais</div>
+      <div className="mode-toggle" style={{ flexWrap: "wrap" }}>
+        {MEASUREMENT_FIELDS.map((f) => (
+          <button key={f.key} className={field === f.key ? "mode-btn active" : "mode-btn"} onClick={() => setField(f.key)}>
+            {f.label}
+          </button>
+        ))}
+      </div>
+      {data.length >= 2 ? (
+        <>
+          <div ref={chartRef}>
+            <Suspense fallback={<ChartFallback height={160} />}>
+              <MiniLineChart data={data} dataKey="valor" yDomain={["dataMin - 1", "dataMax + 1"]} height={160} valueSuffix="cm" />
+            </Suspense>
+          </div>
+          <ShareChartButton containerRef={chartRef} filename={`medida-${field}.png`} />
+          {delta != null && (
+            <div className="kcal-row">
+              <span className="mono">{last}cm</span>
+              <span className={"mono " + (delta <= 0 ? "tone-down" : "tone-up")}>
+                {delta > 0 ? "+" : ""}
+                {delta.toFixed(1)}cm desde o início
+              </span>
+            </div>
+          )}
+        </>
+      ) : (
+        <p className="muted" style={{ marginTop: 10 }}>
+          Registre essa medida em pelo menos 2 dias pra ver a evolução.
+        </p>
       )}
     </div>
   );
@@ -2655,7 +3075,7 @@ function HeatmapCard({ data }) {
                   className="heatmap-cell"
                   title={`${fmtDateLabel(day.date)} — ${day.trained ? day.dt : day.hasAnyData ? "sem treino" : "sem registro"}`}
                   style={{
-                    background: day.trained ? DAY_COLOR[day.dt] : day.hasAnyData ? "var(--surface-2)" : "var(--border)",
+                    background: day.trained ? getDayColor(day.dt) : day.hasAnyData ? "var(--surface-2)" : "var(--border)",
                     opacity: day.trained ? 1 : day.hasAnyData ? 0.7 : 0.35,
                   }}
                 />
@@ -2969,7 +3389,16 @@ function CloudBackupCard({ session, cloudStatus, lastSyncAt, recoveryMode, onRec
 // Notificações push de verdade (chegam com o app fechado) — dependem de
 // estar logado na nuvem, porque quem decide se manda o lembrete é a função
 // agendada da Supabase, olhando os dados sincronizados desse usuário.
-function NotificationsCard({ session }) {
+const NOTIFICATION_KINDS = [
+  { key: "treino", label: "Lembrete de treino", hasTime: true, defaultTime: 12 },
+  { key: "peso", label: "Lembrete de peso", hasTime: true, defaultTime: 9 },
+  { key: "agua", label: "Lembrete de água", hasTime: true, defaultTime: 15 },
+  { key: "sync", label: "Dias sem sincronizar", hasTime: true, defaultTime: 20 },
+  { key: "pr", label: "Novo recorde", hasTime: false },
+  { key: "meta", label: "Meta de peso batida", hasTime: false },
+];
+
+function NotificationsCard({ session, local, setLocal }) {
   const [enabled, setEnabled] = useState(false);
   const [permission, setPermission] = useState("default");
   const [loading, setLoading] = useState(false);
@@ -3035,6 +3464,163 @@ function NotificationsCard({ session }) {
       <button className={enabled ? "btn-secondary" : "btn-primary"} disabled={loading || permission === "denied"} onClick={handleToggle}>
         {enabled ? <BellOff size={15} /> : <Bell size={15} />}{" "}
         {loading ? "Aguenta aí…" : enabled ? "Desativar notificações" : "Ativar notificações"}
+      </button>
+      <div className="notif-pref-list">
+        {NOTIFICATION_KINDS.map((k) => {
+          const prefs = local.notificationPrefs || {};
+          const times = local.notificationTimes || {};
+          const isOn = prefs[k.key] !== false;
+          return (
+            <div className="notif-pref-row" key={k.key}>
+              <button
+                type="button"
+                className={"notif-pref-toggle" + (isOn ? " active" : "")}
+                onClick={() =>
+                  setLocal((prev) => ({
+                    ...prev,
+                    notificationPrefs: { ...prev.notificationPrefs, [k.key]: !isOn },
+                  }))
+                }
+              >
+                <span className="notif-pref-dot" /> {k.label}
+              </button>
+              {k.hasTime && isOn && (
+                <select
+                  className="select"
+                  value={times[k.key] ?? k.defaultTime}
+                  onChange={(e) =>
+                    setLocal((prev) => ({
+                      ...prev,
+                      notificationTimes: { ...prev.notificationTimes, [k.key]: parseInt(e.target.value, 10) },
+                    }))
+                  }
+                >
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <option key={h} value={h}>
+                      {String(h).padStart(2, "0")}h
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CustomTemplatesCard({ templates, onChange }) {
+  const [name, setName] = useState("");
+  const [draftExercises, setDraftExercises] = useState([]);
+  const [exName, setExName] = useState("");
+  const [exSets, setExSets] = useState("3");
+  const [exReps, setExReps] = useState("8-12");
+  const [exRir, setExRir] = useState("1-2");
+
+  function addExerciseToDraft() {
+    if (!exName.trim()) return;
+    setDraftExercises((prev) => [
+      ...prev,
+      {
+        id: `custom-${Date.now().toString(36)}${Math.floor(Math.random() * 1000)}`,
+        n: exName.trim(),
+        sets: parseInt(exSets, 10) || 3,
+        reps: exReps.trim() || "8-12",
+        rir: exRir.trim() || "1-2",
+        variations: [],
+        equivalents: [],
+      },
+    ]);
+    setExName("");
+    setExSets("3");
+    setExReps("8-12");
+    setExRir("1-2");
+  }
+
+  function removeDraftExercise(id) {
+    setDraftExercises((prev) => prev.filter((e) => e.id !== id));
+  }
+
+  function saveTemplate() {
+    if (!name.trim() || draftExercises.length === 0) return;
+    const template = { id: `tpl-${Date.now().toString(36)}`, name: name.trim(), exercises: draftExercises };
+    onChange([...(templates || []), template]);
+    setName("");
+    setDraftExercises([]);
+  }
+
+  function deleteTemplate(id) {
+    onChange((templates || []).filter((t) => t.id !== id));
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">Templates de treino personalizados</div>
+      {(templates || []).length === 0 && (
+        <p className="muted export-hint">
+          Crie sua própria rotina (ex: "Braço extra") pra usar como opção de dia de treino, além do PPL/Upper-Lower fixo.
+        </p>
+      )}
+      {(templates || []).map((t) => (
+        <div className="meal-row" key={t.id}>
+          <div className="favorite-info">
+            <div className="meal-name">{t.name}</div>
+            <div className="muted mono meal-macros">{t.exercises.length} exercício(s)</div>
+          </div>
+          <button className="icon-btn" onClick={() => deleteTemplate(t.id)} aria-label="Excluir template">
+            <Trash2 size={16} />
+          </button>
+        </div>
+      ))}
+
+      <input
+        className="input"
+        placeholder="Nome do template (ex: Braço extra)"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        style={{ marginTop: (templates || []).length ? 10 : 0 }}
+      />
+      {draftExercises.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          {draftExercises.map((e) => (
+            <div className="meal-row" key={e.id}>
+              <div className="favorite-info">
+                <div className="meal-name">{e.n}</div>
+                <div className="muted mono meal-macros">
+                  {e.sets}× {e.reps} · RIR {e.rir}
+                </div>
+              </div>
+              <button className="icon-btn" onClick={() => removeDraftExercise(e.id)} aria-label="Remover exercício">
+                <X size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <input
+        className="input"
+        placeholder="Nome do exercício"
+        value={exName}
+        onChange={(e) => setExName(e.target.value)}
+        style={{ marginTop: 10 }}
+      />
+      <div className="macro-inputs">
+        <input
+          className="input mono"
+          placeholder="Séries"
+          inputMode="numeric"
+          value={exSets}
+          onChange={(e) => setExSets(e.target.value.replace(/\D/g, ""))}
+        />
+        <input className="input mono" placeholder="Reps (ex: 8-12)" value={exReps} onChange={(e) => setExReps(e.target.value)} />
+        <input className="input mono" placeholder="RIR (ex: 1-2)" value={exRir} onChange={(e) => setExRir(e.target.value)} />
+      </div>
+      <button className="btn-secondary" onClick={addExerciseToDraft} disabled={!exName.trim()}>
+        <Plus size={15} /> Adicionar exercício ao template
+      </button>
+      <button className="btn-primary" onClick={saveTemplate} disabled={!name.trim() || draftExercises.length === 0}>
+        <Check size={15} /> Salvar template
       </button>
     </div>
   );
@@ -3136,11 +3722,20 @@ function SettingsSheet({
                   <option>Legs</option>
                   <option>Upper</option>
                   <option>Lower</option>
+                  {(local.customTemplates || []).map((t) => (
+                    <option key={t.id} value={t.name}>
+                      {t.name}
+                    </option>
+                  ))}
                   <option>Descanso</option>
                 </select>
               </div>
             ))}
           </div>
+          <CustomTemplatesCard
+            templates={local.customTemplates}
+            onChange={(next) => setLocal((prev) => ({ ...prev, customTemplates: next }))}
+          />
           <div className="card">
             <div className="card-head">Meta de macros diária (g/dia)</div>
             {["Treino", "Descanso"].map((cat) => (
@@ -3356,7 +3951,7 @@ function SettingsSheet({
             recoveryMode={recoveryMode}
             onRecoveryDone={onRecoveryDone}
           />
-          <NotificationsCard session={session} />
+          <NotificationsCard session={session} local={local} setLocal={setLocal} />
           <div className="card">
             <div className="card-head">Armazenamento</div>
             <div className="bar-track">
@@ -3947,4 +4542,33 @@ button:active:not(:disabled){transform:scale(0.96);}
 .heatmap-col{display:flex;flex-direction:column;gap:3px;flex-shrink:0;}
 .heatmap-cell{width:11px;height:11px;border-radius:2.5px;}
 .heatmap-cell-empty{background:transparent;}
+
+.treino-toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:-4px;}
+.treino-toolbar-btn{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:20px;
+  padding:7px 13px;font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer;
+  font-family:'IBM Plex Sans',sans-serif;
+}
+.treino-toolbar-btn.active{color:var(--push);border-color:var(--push);background:rgba(198,144,46,0.12);}
+
+.undo-toast{
+  position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));
+  z-index:60;background:var(--surface-2);border:1px solid var(--border);color:var(--text);
+  border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:14px;font-size:13px;
+  box-shadow:0 8px 24px -8px var(--card-shadow-lg);max-width:calc(100% - 32px);
+}
+.undo-toast button{
+  background:none;border:none;color:var(--push);font-weight:600;font-size:13px;cursor:pointer;padding:0;
+  font-family:'IBM Plex Sans',sans-serif;flex-shrink:0;
+}
+
+.notif-pref-list{margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:8px;}
+.notif-pref-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.notif-pref-toggle{
+  background:none;border:none;color:var(--muted);font-size:13px;display:flex;align-items:center;gap:8px;
+  cursor:pointer;padding:0;font-family:'IBM Plex Sans',sans-serif;text-align:left;
+}
+.notif-pref-dot{width:9px;height:9px;border-radius:50%;background:var(--border);flex-shrink:0;}
+.notif-pref-toggle.active{color:var(--text);}
+.notif-pref-toggle.active .notif-pref-dot{background:var(--pull);}
 `;
