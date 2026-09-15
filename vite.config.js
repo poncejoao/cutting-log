@@ -7,6 +7,15 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
+      // injectManifest (em vez de generateSW) — precisamos de um src/sw.js
+      // escrito à mão pra poder tratar os eventos "push" e "notificationclick"
+      // das notificações; o generateSW automático não permite handlers custom.
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.js",
+      injectManifest: {
+        globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
+      },
       includeAssets: ["icon-192-v3.png", "icon-512-v3.png"],
       manifest: {
         name: "Cutting Log",
@@ -40,30 +49,6 @@ export default defineConfig({
             short_name: "Dieta",
             url: "/?tab=dieta",
             icons: [{ src: "icon-192-v3.png", sizes: "192x192", type: "image/png" }],
-          },
-        ],
-      },
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,ico,png,svg}"],
-        runtimeCaching: [
-          {
-            // folha de estilo do Google Fonts — precisa revalidar de vez em quando
-            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "google-fonts-stylesheets",
-              expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 365 },
-            },
-          },
-          {
-            // arquivos de fonte em si — nunca mudam, cache longo
-            urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "google-fonts-webfonts",
-              expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 365 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
           },
         ],
       },

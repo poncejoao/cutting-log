@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
+import { isPushSupported, getPushPermission, isPushEnabled, enablePush, disablePush } from "./push.js";
 
 // recharts é a maior dependência do bundle (~metade do JS) e só é usada nos
 // gráficos da aba Progresso — carrega sob demanda em vez de no boot do app.
@@ -2965,6 +2966,80 @@ function CloudBackupCard({ session, cloudStatus, lastSyncAt, recoveryMode, onRec
   );
 }
 
+// Notificações push de verdade (chegam com o app fechado) — dependem de
+// estar logado na nuvem, porque quem decide se manda o lembrete é a função
+// agendada da Supabase, olhando os dados sincronizados desse usuário.
+function NotificationsCard({ session }) {
+  const [enabled, setEnabled] = useState(false);
+  const [permission, setPermission] = useState("default");
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
+  const supported = isPushSupported();
+
+  useEffect(() => {
+    if (!supported) return;
+    setPermission(getPushPermission());
+    isPushEnabled().then(setEnabled);
+  }, []);
+
+  if (!session) {
+    return (
+      <div className="card">
+        <div className="card-head">Notificações</div>
+        <p className="muted export-hint">Faça login no backup na nuvem (aqui embaixo) pra poder ativar notificações.</p>
+      </div>
+    );
+  }
+
+  if (!supported) {
+    return (
+      <div className="card">
+        <div className="card-head">Notificações</div>
+        <p className="muted export-hint">Esse navegador não suporta notificações push.</p>
+      </div>
+    );
+  }
+
+  async function handleToggle() {
+    setLoading(true);
+    setMsg("");
+    try {
+      if (enabled) {
+        await disablePush(session.user.id);
+        setEnabled(false);
+      } else {
+        await enablePush(session.user.id);
+        setEnabled(true);
+        setPermission(getPushPermission());
+      }
+    } catch (e) {
+      setMsg(e?.message || "Erro inesperado ao configurar notificações.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">Notificações</div>
+      <p className="muted export-hint">
+        Lembrete de treino (se passar do meio-dia sem registrar), lembrete de peso, aviso de dias sem sincronizar e um
+        alô quando bater a meta — chegam mesmo com o app fechado.
+      </p>
+      {permission === "denied" && (
+        <p className="sync-age-warn">
+          Notificações bloqueadas nas configurações do navegador/celular — precisa liberar por lá antes de ativar aqui.
+        </p>
+      )}
+      {msg && <p className="sync-age-warn">{msg}</p>}
+      <button className={enabled ? "btn-secondary" : "btn-primary"} disabled={loading || permission === "denied"} onClick={handleToggle}>
+        {enabled ? <BellOff size={15} /> : <Bell size={15} />}{" "}
+        {loading ? "Aguenta aí…" : enabled ? "Desativar notificações" : "Ativar notificações"}
+      </button>
+    </div>
+  );
+}
+
 function SettingsSheet({
   settings,
   setSettings,
@@ -3281,6 +3356,7 @@ function SettingsSheet({
             recoveryMode={recoveryMode}
             onRecoveryDone={onRecoveryDone}
           />
+          <NotificationsCard session={session} />
           <div className="card">
             <div className="card-head">Armazenamento</div>
             <div className="bar-track">
