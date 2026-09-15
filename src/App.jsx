@@ -141,6 +141,7 @@ const DEFAULT_SETTINGS = {
   notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true },
   notificationTimes: { treino: 12, peso: 9, sync: 20, agua: 15 },
   customTemplates: [],
+  fontScale: 1,
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -172,6 +173,31 @@ const MUSCLE_BY_ID = {
   "panturrilha-sentada": "Panturrilha",
   "abdomen": "Abdômen",
 };
+
+// Dica técnica curta por exercício (id fixo do PLAN) — só pros exercícios
+// fixos, templates personalizados não têm.
+const EXERCISE_TIPS = {
+  "supino-reto": "Escápulas retraídas e apoiadas no banco, barra desce até tocar o peito sem quicar.",
+  "supino-inclinado": "Banco a 30-45° — mais que isso vira mais ombro do que peito superior.",
+  "desenvolvimento": "Não hiperestenda a lombar — abdômen contraído pra não virar um exercício de costas.",
+  "elevacao-lateral": "Cotovelo levemente flexionado e fixo, sobe até a altura do ombro, sem usar embalo do tronco.",
+  "triceps-pulley": "Cotovelo colado no corpo o tempo todo — só o antebraço se move.",
+  "triceps-frances": "Cotovelo aponta pro teto e não se abre — o movimento é só de dobradiça no cotovelo.",
+  "remada-curvada": "Tronco fixo (não balança), puxa em direção ao umbigo, aperta a escápula no topo.",
+  "puxada-aberta": "Puxa com o cotovelo, não com a mão — imagina levar o cotovelo até o bolso de trás.",
+  "remada-baixa": "Coluna neutra, não arredonda as costas pra puxar mais peso.",
+  "face-pull": "Puxa até a altura do rosto com os cotovelos bem altos — foco no manguito e deltoide posterior.",
+  "rosca-direta": "Cotovelo fixo ao lado do corpo, sem balançar o tronco pra ajudar a subir.",
+  "rosca-martelo": "Pegada neutra o tempo todo (polegar pra cima) — recruta mais o braquial.",
+  "lombar-maquina": "Movimento controlado, sem hiperestender no topo — é extensão, não hiperextensão.",
+  "agachamento": "Joelho na direção do pé, desce até pelo menos paralelo, peso no meio do pé.",
+  "cadeira-extensora": "Trava 1 segundo no topo antes de descer controlado.",
+  "mesa-flexora": "Não tira o quadril do banco pra compensar — isola o posterior de coxa.",
+  "panturrilha-pe": "Amplitude completa: desce até alongar de verdade, sobe até a ponta do pé.",
+  "panturrilha-sentada": "Foco no gastrocnêmio muda pro sóleo com o joelho flexionado — controla a descida.",
+  "abdomen": "Movimento vem do abdômen, não do quadril — evita balançar as pernas pra ajudar.",
+};
+
 // Nome exibido (incluindo substituições/equivalentes) → grupo muscular. Como
 // o exercício logado é salvo pelo NOME (que pode ser um equivalente escolhido
 // pelo usuário), mapear por nome garante que a substituição ainda conte pro
@@ -377,7 +403,45 @@ function computeGoalStatus(logs, goalWeight, goalDate) {
     verdict = "muito_lento";
   }
 
-  return { currentWeight, goalWeight, daysLeft, weeklyRate, neededWeeklyRate, verdict };
+  // Previsão de data — só faz sentido quando o ritmo atual está na direção
+  // certa (senão a "data prevista" seria no passado ou nunca).
+  let etaDate = null;
+  if (weeklyRate != null && Math.abs(weeklyRate) > 0.01 && Math.sign(weeklyRate) === Math.sign(neededTotal || 1)) {
+    const dailyRate = weeklyRate / 7;
+    const daysToGoal = Math.round(neededTotal / dailyRate);
+    if (daysToGoal > 0 && daysToGoal < 3650) {
+      const eta = new Date(lastDate + "T12:00:00");
+      eta.setDate(eta.getDate() + daysToGoal);
+      etaDate = todayISO(eta);
+    }
+  }
+
+  return { currentWeight, goalWeight, daysLeft, weeklyRate, neededWeeklyRate, verdict, etaDate };
+}
+
+// Platô de peso — só entra em alerta quando tem meta configurada (senão
+// "peso parado" pode ser exatamente o que a pessoa quer, ex: manutenção) e
+// dados suficientes pra não confundir uma pausa de 3 dias com platô de verdade.
+function computePlateau(logs, goalWeight) {
+  if (!goalWeight) return null;
+  const entries = Object.entries(logs)
+    .filter(([, v]) => v.bodyweight != null)
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  if (entries.length < 8) return null;
+  const lastDate = entries[entries.length - 1][0];
+  const cutoff = new Date(lastDate + "T12:00:00");
+  cutoff.setDate(cutoff.getDate() - 13);
+  const cutoffISO = todayISO(cutoff);
+  const recent = entries.filter(([d]) => d >= cutoffISO);
+  if (recent.length < 8) return null;
+  const weights = recent.map(([, v]) => v.bodyweight);
+  const range = Math.max(...weights) - Math.min(...weights);
+  const currentWeight = weights[weights.length - 1];
+  const goingRightDirection = Math.sign(goalWeight - currentWeight) !== 0;
+  if (range <= 0.4 && Math.abs(goalWeight - currentWeight) >= 0.5 && goingRightDirection) {
+    return { days: recent.length, range: range.toFixed(1), from: recent[0][0], to: lastDate };
+  }
+  return null;
 }
 
 // 1RM estimado pela fórmula de Epley — mais estável que olhar só a carga
@@ -506,6 +570,35 @@ function computeMonthSummary(logs, settings, prHistory) {
     weightStart: wStart?.value ?? null,
     weightEnd: wEnd?.value ?? null,
     prCount: prsThisMonth.length,
+  };
+}
+
+// Versão genérica do resumo (semana/mês reusam essa lógica com janelas
+// diferentes) — usada pelo card compartilhável, que deixa o usuário escolher
+// entre "mês" e "ano".
+function computePeriodSummary(logs, settings, prHistory, days) {
+  const to = todayISO();
+  const fromD = new Date();
+  fromD.setDate(fromD.getDate() - (days - 1));
+  const from = todayISO(fromD);
+  let workouts = 0;
+  Object.entries(logs).forEach(([d, v]) => {
+    if (d < from || d > to) return;
+    const dow = new Date(d + "T12:00:00").getDay();
+    const scheduled = settings.schedule[dow] || "Descanso";
+    const dt = v.dayTypeOverride || scheduled;
+    if (isTrainingDay(dt) && v.exercises && Object.keys(v.exercises).length > 0) workouts++;
+  });
+  const wStart = firstInRange(logs, bodyweightPred, from, to);
+  const wEnd = lastInRange(logs, bodyweightPred, from, to);
+  const prsInRange = prHistory.filter((p) => p.date >= from && p.date <= to);
+  return {
+    from,
+    to,
+    workouts,
+    weightStart: wStart?.value ?? null,
+    weightEnd: wEnd?.value ?? null,
+    prCount: prsInRange.length,
   };
 }
 
@@ -873,6 +966,22 @@ export default function App() {
     undoTimerRef.current = setTimeout(() => setUndoToast(null), 5000);
   }
 
+  // Tour rápido só pra quem abre o app pela primeira vez de verdade (nenhum
+  // dia registrado ainda) — quem já usa o app não vê isso nunca mais, mesmo
+  // que o flag de "já visto" seja apagado, porque a condição real é "tem
+  // dado ou não".
+  const [showTour, setShowTour] = useState(false);
+  useEffect(() => {
+    if (!ready) return;
+    const alreadySeen = localStorage.getItem("cutting-log:tourSeen");
+    if (!alreadySeen && Object.keys(logs).length === 0) setShowTour(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+  function dismissTour() {
+    localStorage.setItem("cutting-log:tourSeen", "1");
+    setShowTour(false);
+  }
+
   useEffect(() => {
     (async () => {
       try {
@@ -1014,7 +1123,7 @@ export default function App() {
   const streak = useMemo(() => computeStreak(logs), [logs]);
 
   return (
-    <div className="app">
+    <div className="app" style={{ "--font-scale": settings.fontScale || 1 }}>
       <style>{CSS}</style>
       <header className="topbar">
         <div className="brand">
@@ -1119,6 +1228,7 @@ export default function App() {
           settings={settings}
           setSettings={setSettings}
           logs={logs}
+          setLogs={setLogs}
           onCleanEmptyDays={cleanEmptyDays}
           session={session}
           cloudStatus={cloudStatus}
@@ -1128,6 +1238,65 @@ export default function App() {
           onClose={() => setShowSettings(false)}
         />
       )}
+
+      {showTour && <OnboardingTour onDone={dismissTour} />}
+    </div>
+  );
+}
+
+const TOUR_STEPS = [
+  {
+    icon: Home,
+    title: "Hoje",
+    text: "Sua tela de partida: peso, hidratação, suplementos, foto e notas do dia — tudo o que você registra rapidinho, todo dia.",
+  },
+  {
+    icon: Dumbbell,
+    title: "Treino",
+    text: "Cada exercício do seu treino do dia, com histórico, sugestão de carga, timer de descanso e detecção automática de recorde.",
+  },
+  {
+    icon: UtensilsCrossed,
+    title: "Dieta",
+    text: "Registre refeições por alimento ou manual, acompanhe os macros da meta e salve favoritos pra registrar em 1 toque.",
+  },
+  {
+    icon: TrendingUp,
+    title: "Progresso",
+    text: "Gráficos de peso e força, histórico de recordes, calendário de treinos e comparações — tudo calculado automaticamente.",
+  },
+];
+
+function OnboardingTour({ onDone }) {
+  const [step, setStep] = useState(0);
+  const s = TOUR_STEPS[step];
+  const Icon = s.icon;
+  const isLast = step === TOUR_STEPS.length - 1;
+  return (
+    <div className="sheet-backdrop">
+      <div className="tour-card">
+        <button className="icon-btn tour-skip" onClick={onDone} aria-label="Pular tour">
+          <X size={16} />
+        </button>
+        <div className="tour-icon">
+          <Icon size={28} />
+        </div>
+        <div className="tour-title">{s.title}</div>
+        <p className="tour-text">{s.text}</p>
+        <div className="tour-dots">
+          {TOUR_STEPS.map((_, i) => (
+            <span key={i} className={"tour-dot" + (i === step ? " active" : "")} />
+          ))}
+        </div>
+        <button className="btn-primary" onClick={() => (isLast ? onDone() : setStep((s) => s + 1))}>
+          {isLast ? "Começar" : "Próximo"} {!isLast && <ChevronRight size={16} />}
+        </button>
+        {!isLast && (
+          <button className="link-btn" style={{ marginTop: 10 }} onClick={onDone}>
+            Pular
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1764,6 +1933,8 @@ function ExerciseCard({
 }) {
   const [showWarmup, setShowWarmup] = useState(false);
   const [showPainInput, setShowPainInput] = useState(!!painNote);
+  const [showTip, setShowTip] = useState(false);
+  const tip = EXERCISE_TIPS[plan.id];
   const top = topRep(plan.reps);
   // Completa com séries vazias até bater o número planejado — tanto pra quem
   // nunca registrou nada quanto pra dado antigo já salvo com menos séries do
@@ -1948,7 +2119,13 @@ function ExerciseCard({
           <div className="ex-meta mono">
             {plan.sets}× {plan.reps} reps{plan.rir ? ` · RIR ${plan.rir}` : ""}
             {isSubstituted && <span className="sub-note"> · substituindo {plan.n}</span>}
+            {tip && (
+              <button type="button" className="tip-toggle" onClick={() => setShowTip((s) => !s)} aria-label="Dica técnica">
+                ?
+              </button>
+            )}
           </div>
+          {tip && showTip && <div className="tip-text">{tip}</div>}
           {currentE1RM > 0 && <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg</div>}
           <button
             type="button"
@@ -2458,6 +2635,7 @@ function ProgressoTab({ logs, settings }) {
     () => computeGoalStatus(logs, settings.goalWeight, settings.goalDate),
     [logs, settings.goalWeight, settings.goalDate]
   );
+  const plateau = useMemo(() => computePlateau(logs, settings.goalWeight), [logs, settings.goalWeight]);
   const prHistory = useMemo(() => computePRHistory(logs), [logs]);
   const weekSummary = useMemo(() => computeWeekSummary(logs, settings, prHistory), [logs, settings, prHistory]);
   const monthSummary = useMemo(() => computeMonthSummary(logs, settings, prHistory), [logs, settings, prHistory]);
@@ -2479,7 +2657,11 @@ function ProgressoTab({ logs, settings }) {
 
       <MonthSummaryCard summary={monthSummary} />
 
+      <ShareSummaryCard logs={logs} settings={settings} />
+
       {goalStatus && <GoalStatusCard status={goalStatus} />}
+
+      {plateau && <PlateauCard plateau={plateau} />}
 
       <div className="card">
         <div className="card-head">Peso corporal</div>
@@ -2618,6 +2800,72 @@ function WeekSummaryCard({ summary }) {
       <div className="hint" style={{ marginBottom: 0 }}>
         Últimos 7 dias, atualizado automaticamente.
       </div>
+    </div>
+  );
+}
+
+function ShareSummaryCard({ logs, settings }) {
+  const [period, setPeriod] = useState("month"); // "month" | "year"
+  const days = period === "month" ? 30 : 365;
+  const prHistory = useMemo(() => computePRHistory(logs), [logs]);
+  const summary = useMemo(() => computePeriodSummary(logs, settings, prHistory, days), [logs, settings, prHistory, days]);
+  const streak = useMemo(() => computeStreak(logs), [logs]);
+  const containerRef = useRef(null);
+  const weightDelta =
+    summary.weightStart != null && summary.weightEnd != null ? summary.weightEnd - summary.weightStart : null;
+  const periodLabel = period === "month" ? "Últimos 30 dias" : "Últimos 12 meses";
+
+  return (
+    <div className="card">
+      <div className="card-head">Resumo compartilhável</div>
+      <div className="mode-toggle">
+        <button className={period === "month" ? "mode-btn active" : "mode-btn"} onClick={() => setPeriod("month")}>
+          Mês
+        </button>
+        <button className={period === "year" ? "mode-btn active" : "mode-btn"} onClick={() => setPeriod("year")}>
+          Ano
+        </button>
+      </div>
+      <div ref={containerRef} className="share-card-svg-wrap">
+        <svg viewBox="0 0 500 640" xmlns="http://www.w3.org/2000/svg">
+          <rect x="1" y="1" width="498" height="638" rx="24" fill="var(--surface)" stroke="var(--border)" />
+          <text x="40" y="72" fontSize="30" fontWeight="700" fill="var(--text)" fontFamily="Georgia, serif">
+            Cutting Log
+          </text>
+          <text x="40" y="100" fontSize="15" fill="var(--muted)">
+            {periodLabel}
+          </text>
+
+          <text x="40" y="195" fontSize="14" fill="var(--muted)">
+            Treinos feitos
+          </text>
+          <text x="40" y="240" fontSize="52" fontWeight="700" fill="var(--push)">
+            {summary.workouts}
+          </text>
+
+          <text x="40" y="315" fontSize="14" fill="var(--muted)">
+            Variação de peso
+          </text>
+          <text x="40" y="360" fontSize="36" fontWeight="700" fill="var(--text)">
+            {weightDelta != null ? `${weightDelta > 0 ? "+" : ""}${weightDelta.toFixed(1)}kg` : "—"}
+          </text>
+
+          <text x="40" y="435" fontSize="14" fill="var(--muted)">
+            Recordes batidos
+          </text>
+          <text x="40" y="480" fontSize="52" fontWeight="700" fill="var(--legs)">
+            {summary.prCount}
+          </text>
+
+          <text x="40" y="555" fontSize="14" fill="var(--muted)">
+            Sequência atual
+          </text>
+          <text x="40" y="600" fontSize="36" fontWeight="700" fill="var(--pull)">
+            {streak} dia{streak === 1 ? "" : "s"}
+          </text>
+        </svg>
+      </div>
+      <ShareChartButton containerRef={containerRef} filename={`cutting-log-resumo-${period === "month" ? "mes" : "ano"}.png`} />
     </div>
   );
 }
@@ -2868,7 +3116,26 @@ function GoalStatusCard({ status }) {
           </span>
         </div>
       )}
+      {status.etaDate && status.verdict !== "batido" && status.verdict !== "prazo_passou" && (
+        <div className="phase-stat-row">
+          <span className="muted">Previsão (no ritmo atual)</span>
+          <span className="mono">{fmtDateLabel(status.etaDate)}</span>
+        </div>
+      )}
       <div className={"goal-verdict " + v.tone}>{v.text}</div>
+    </div>
+  );
+}
+
+function PlateauCard({ plateau }) {
+  return (
+    <div className="card">
+      <div className="card-head">Platô detectado</div>
+      <div className="suggestion deload" style={{ marginTop: 0 }}>
+        <TrendingDown size={13} /> Peso variou só {plateau.range}kg nos últimos {plateau.days} registros ({fmtDateLabel(plateau.from)} –{" "}
+        {fmtDateLabel(plateau.to)}) — mesmo com a meta ainda longe. Vale reavaliar as calorias ou o NEAT (quanto você
+        se movimenta fora do treino).
+      </div>
     </div>
   );
 }
@@ -3630,6 +3897,7 @@ function SettingsSheet({
   settings,
   setSettings,
   logs,
+  setLogs,
   onCleanEmptyDays,
   session,
   cloudStatus,
@@ -3641,6 +3909,39 @@ function SettingsSheet({
   const [local, setLocal] = useState(settings);
   const [newPhase, setNewPhase] = useState({ name: "", start: "", end: "" });
   const [newSupplement, setNewSupplement] = useState("");
+  const [importMsg, setImportMsg] = useState("");
+  const importInputRef = useRef(null);
+
+  async function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImportMsg("");
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || !parsed.logs) {
+        setImportMsg("Arquivo não parece um backup válido do Cutting Log.");
+        return;
+      }
+      const dayCount = Object.keys(parsed.logs).length;
+      const ok = window.confirm(
+        `Isso vai SUBSTITUIR todos os dados atuais pelos do backup (${dayCount} dia(s) registrado(s), exportado em ${
+          parsed.exportedAt ? fmtDateLabel(parsed.exportedAt.slice(0, 10)) : "data desconhecida"
+        }). Essa ação não tem desfazer. Continuar?`
+      );
+      if (!ok) return;
+      setLogs(parsed.logs || {});
+      if (parsed.settings) {
+        const merged = { ...DEFAULT_SETTINGS, ...parsed.settings };
+        setSettings(merged);
+        setLocal(merged);
+      }
+      setImportMsg("Backup importado com sucesso.");
+    } catch (err) {
+      setImportMsg("Não consegui ler esse arquivo — confere se é um JSON exportado daqui mesmo.");
+    }
+  }
   const [pdfBusy, setPdfBusy] = useState(false);
 
   const storage = useMemo(() => {
@@ -3705,6 +4006,24 @@ function SettingsSheet({
               >
                 Claro
               </button>
+            </div>
+            <div className="hint phase-date-label" style={{ marginTop: 12 }}>
+              Tamanho da fonte (séries e título do dia)
+            </div>
+            <div className="mode-toggle" style={{ marginBottom: 0 }}>
+              {[
+                { v: 1, label: "Normal" },
+                { v: 1.15, label: "Grande" },
+                { v: 1.3, label: "Extra" },
+              ].map((opt) => (
+                <button
+                  key={opt.v}
+                  className={(local.fontScale || 1) === opt.v ? "mode-btn active" : "mode-btn"}
+                  onClick={() => setLocal({ ...local, fontScale: opt.v })}
+                >
+                  {opt.label}
+                </button>
+              ))}
             </div>
           </div>
           <div className="card">
@@ -4005,6 +4324,17 @@ function SettingsSheet({
               <FileText size={15} /> {pdfBusy ? "Gerando…" : "Exportar resumo em PDF"}
             </button>
           </div>
+          <div className="card">
+            <div className="card-head">Importar backup</div>
+            <p className="muted export-hint">
+              Restaura um backup JSON exportado daqui — útil se trocar de celular sem estar logado na nuvem.
+            </p>
+            <input ref={importInputRef} type="file" accept="application/json" hidden onChange={handleImportFile} />
+            <button className="btn-secondary" onClick={() => importInputRef.current?.click()}>
+              <Download size={15} style={{ transform: "rotate(180deg)" }} /> Importar backup (JSON)
+            </button>
+            {importMsg && <p className="muted export-hint">{importMsg}</p>}
+          </div>
           <button
             className="btn-primary"
             onClick={() => {
@@ -4246,7 +4576,7 @@ button:active:not(:disabled){transform:scale(0.96);}
   background:none;border:none;color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:4px;
   cursor:pointer;padding:2px 4px;font-family:'IBM Plex Sans',sans-serif;
 }
-.hero-title{font-family:'Fraunces',serif;font-size:30px;font-weight:650;line-height:1.1;}
+.hero-title{font-family:'Fraunces',serif;font-size:calc(30px * var(--font-scale, 1));font-weight:650;line-height:1.1;}
 .hero-override-note{color:var(--muted);font-size:11.5px;margin-top:4px;}
 .link-btn{background:none;border:none;color:var(--push);font-size:11.5px;text-decoration:underline;cursor:pointer;padding:0;font-family:'IBM Plex Sans',sans-serif;}
 .day-switch-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
@@ -4345,7 +4675,7 @@ button:active:not(:disabled){transform:scale(0.96);}
   display:grid;grid-template-columns:32px 1fr 1fr;gap:8px;align-items:center;margin-bottom:8px;
 }
 .set-grid-head{font-size:11px;}
-.set-input{padding:12px 9px;text-align:center;font-size:15px;}
+.set-input{padding:12px 9px;text-align:center;font-size:calc(15px * var(--font-scale, 1));}
 
 .macro-inputs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:10px 0;}
 .mode-toggle{display:flex;gap:6px;margin-bottom:12px;}
@@ -4571,4 +4901,29 @@ button:active:not(:disabled){transform:scale(0.96);}
 .notif-pref-dot{width:9px;height:9px;border-radius:50%;background:var(--border);flex-shrink:0;}
 .notif-pref-toggle.active{color:var(--text);}
 .notif-pref-toggle.active .notif-pref-dot{background:var(--pull);}
+
+.tip-toggle{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--muted);border-radius:50%;
+  width:16px;height:16px;font-size:10px;line-height:1;cursor:pointer;padding:0;margin-left:4px;
+  display:inline-flex;align-items:center;justify-content:center;font-family:'IBM Plex Sans',sans-serif;vertical-align:1px;
+}
+.tip-text{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4;font-style:italic;}
+
+.share-card-svg-wrap{margin-top:12px;}
+.share-card-svg-wrap svg{width:100%;height:auto;border-radius:16px;display:block;}
+
+.tour-card{
+  background:var(--bg);width:100%;max-width:360px;border-radius:18px;padding:28px 24px;
+  border:1px solid var(--border);text-align:center;position:relative;margin:16px;
+}
+.tour-skip{position:absolute;top:10px;right:10px;width:32px;height:32px;}
+.tour-icon{
+  width:56px;height:56px;border-radius:50%;background:rgba(198,144,46,0.15);color:var(--push);
+  display:flex;align-items:center;justify-content:center;margin:0 auto 16px;
+}
+.tour-title{font-family:'Fraunces',serif;font-size:20px;font-weight:650;margin-bottom:8px;}
+.tour-text{font-size:13.5px;color:var(--muted);line-height:1.5;margin-bottom:18px;}
+.tour-dots{display:flex;justify-content:center;gap:6px;margin-bottom:18px;}
+.tour-dot{width:6px;height:6px;border-radius:50%;background:var(--border);}
+.tour-dot.active{background:var(--push);width:16px;border-radius:4px;}
 `;
