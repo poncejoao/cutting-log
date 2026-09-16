@@ -176,6 +176,8 @@ const DEFAULT_SETTINGS = {
   fontScale: 1,
   heightCm: null,
   caffeineDoseMg: 80,
+  lastTDEE: null,
+  injuries: [],
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -262,6 +264,10 @@ const topRep = (range) => parseInt(range.split("-").pop(), 10);
 // 5 fixos (Push/Pull/Legs/Upper/Lower) e qualquer template personalizado
 // criado pelo usuário (que nunca se chama "Descanso").
 const isTrainingDay = (dayType) => dayType !== "Descanso";
+// Heurística pra saber se um exercício é feito um lado de cada vez — cobre os
+// nomes/variações e equivalentes que já existem no PLAN, sem precisar marcar
+// exercício por exercício manualmente.
+const isUnilateralName = (name) => /unilateral|alternad|serrote/i.test(name || "");
 const ALL_DAY_TYPES = ["Push", "Pull", "Legs", "Upper", "Lower", "Descanso"];
 // Paleta de reserva pros templates personalizados — escolhida por um hash
 // simples do nome, pra cada template ter uma cor estável e distinta sem o
@@ -571,6 +577,50 @@ function computeStagnation(logs) {
   return stalled.length ? stalled : null;
 }
 
+// Risco de overtraining: só dispara quando os três sinais apontam junto —
+// volume semanal saltou (>=20% vs semana passada), RPE médio da semana alto
+// (>=8) e sono médio baixo (<6h). Qualquer um sozinho é normal; os três
+// juntos é o padrão clássico de fadiga acumulada antes de uma lesão/platô.
+function computeOvertrainingRisk(logs) {
+  const today = new Date();
+  function weekRange(offsetWeeks) {
+    const end = new Date(today);
+    end.setDate(end.getDate() - offsetWeeks * 7);
+    const start = new Date(end);
+    start.setDate(end.getDate() - 6);
+    return { startISO: todayISO(start), endISO: todayISO(end) };
+  }
+  function weekVolume(startISO, endISO) {
+    let vol = 0;
+    Object.entries(logs).forEach(([d, v]) => {
+      if (d < startISO || d > endISO) return;
+      Object.values(v?.exercises || {}).forEach((ex) => {
+        (ex?.sets || []).forEach((s) => {
+          const w = parseFloat(s.weight) || 0;
+          const r = parseInt(s.reps, 10) || 0;
+          vol += w * r;
+        });
+      });
+    });
+    return vol;
+  }
+  const thisWeek = weekRange(0);
+  const lastWeek = weekRange(1);
+  const volThis = weekVolume(thisWeek.startISO, thisWeek.endISO);
+  const volLast = weekVolume(lastWeek.startISO, lastWeek.endISO);
+  if (volThis === 0 || volLast === 0) return null;
+
+  const rpeEntries = Object.entries(logs).filter(([d, v]) => d >= thisWeek.startISO && d <= thisWeek.endISO && v.sessionRPE != null);
+  const sleepEntries = Object.entries(logs).filter(([d, v]) => d >= thisWeek.startISO && d <= thisWeek.endISO && v.sleepHours != null);
+  if (!rpeEntries.length || !sleepEntries.length) return null;
+  const avgRPE = rpeEntries.reduce((s, [, v]) => s + v.sessionRPE, 0) / rpeEntries.length;
+  const avgSleep = sleepEntries.reduce((s, [, v]) => s + v.sleepHours, 0) / sleepEntries.length;
+
+  const volumeJumpPct = ((volThis - volLast) / volLast) * 100;
+  if (!(volumeJumpPct >= 20 && avgRPE >= 8 && avgSleep < 6)) return null;
+  return { volumeJumpPct: Math.round(volumeJumpPct), avgRPE: +avgRPE.toFixed(1), avgSleep: +avgSleep.toFixed(1) };
+}
+
 // % de gordura estimado pela fórmula da Marinha americana — só cintura,
 // pescoço e altura, sem precisar de paquímetro. É uma estimativa (erro típico
 // de ±3-4pp), não substitui uma bioimpedância ou dobra cutânea de verdade.
@@ -621,6 +671,24 @@ function computeWeeklyCalorieBank(logs, settings, selectedDate) {
 function estimate1RM(weight, reps) {
   if (!weight || !reps) return 0;
   return weight * (1 + reps / 30);
+}
+
+// Brzycki e Lombardi divergem mais do Epley quanto maior o número de reps —
+// combinar as três dá uma estimativa mais robusta do que confiar numa só
+// fórmula de bolso.
+function estimate1RMBrzycki(weight, reps) {
+  if (!weight || !reps || reps >= 37) return 0;
+  return weight / (1.0278 - 0.0278 * reps);
+}
+function estimate1RMLombardi(weight, reps) {
+  if (!weight || !reps) return 0;
+  return weight * Math.pow(reps, 0.1);
+}
+function estimate1RMAvg(weight, reps) {
+  const vals = [estimate1RM(weight, reps), estimate1RMBrzycki(weight, reps), estimate1RMLombardi(weight, reps)].filter(
+    (v) => v > 0 && isFinite(v)
+  );
+  return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
 }
 
 // Sequência de dias seguidos com algo registrado (peso, treino, refeição ou
@@ -1119,9 +1187,12 @@ export default function App() {
     const qs = new URLSearchParams(window.location.search).get("tab");
     return VALID_TABS.includes(qs) ? qs : "hoje";
   });
-  // Ação rápida via atalho do iOS (Siri): ?tab=hoje&acao=agua|cafe|creatina|peso
-  // — dá pra amarrar cada uma num comando de voz no app Atalhos.
+  // Ação rápida via atalho do iOS (Siri): ?tab=hoje&acao=agua|cafe|creatina|peso|sono
+  // — dá pra amarrar cada uma num comando de voz no app Atalhos. O parâmetro
+  // opcional "valor" permite um Atalho que já lê o peso/sono direto do Apple
+  // Saúde e manda o número junto, sem precisar digitar na mão.
   const [pendingAction] = useState(() => new URLSearchParams(window.location.search).get("acao"));
+  const [pendingValor] = useState(() => new URLSearchParams(window.location.search).get("valor"));
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [logs, setLogs] = useState({});
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -1355,6 +1426,7 @@ export default function App() {
             showUndo={showUndo}
             logs={logs}
             pendingAction={pendingAction}
+            pendingValor={pendingValor}
           />
         )}
         {tab === "treino" && (
@@ -1382,7 +1454,7 @@ export default function App() {
             showUndo={showUndo}
           />
         )}
-        {tab === "progresso" && <ProgressoTab logs={logs} settings={settings} />}
+        {tab === "progresso" && <ProgressoTab logs={logs} settings={settings} setSettings={setSettings} />}
       </main>
 
       {undoToast && (
@@ -1603,7 +1675,7 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 // ---------------- Hoje ----------------
-function HojeTab({ settings, setSettings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready, showUndo, logs, pendingAction }) {
+function HojeTab({ settings, setSettings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready, showUndo, logs, pendingAction, pendingValor }) {
   const [switching, setSwitching] = useState(false);
   const training = isTrainingDay(dayType);
   const latestWeight = getLatestBodyweight(logs, settings.startWeight);
@@ -1617,15 +1689,21 @@ function HojeTab({ settings, setSettings, selectedDate, setSelectedDate, dayType
   useEffect(() => {
     if (!ready || !pendingAction || ranActionRef.current) return;
     ranActionRef.current = true;
+    const valor = pendingValor ? parseFloat(pendingValor.replace(",", ".")) : null;
     if (pendingAction === "agua") updateDay({ water: (dayEntry.water || 0) + 1 });
     else if (pendingAction === "cafe") updateDay({ caffeine: (dayEntry.caffeine || 0) + 1 });
     else if (pendingAction === "creatina") {
       updateDay({ supplements: { ...(dayEntry.supplements || {}), Creatina: true } });
     } else if (pendingAction === "peso") {
-      setTimeout(() => bwInputRef.current?.focus(), 150);
+      // Com "valor" (ex: vindo de um Atalho que lê o Apple Saúde), grava
+      // direto — sem valor, só foca o campo pro usuário digitar.
+      if (valor > 0) updateDay({ bodyweight: valor });
+      else setTimeout(() => bwInputRef.current?.focus(), 150);
+    } else if (pendingAction === "sono" && valor > 0) {
+      updateDay({ sleepHours: valor });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, pendingAction]);
+  }, [ready, pendingAction, pendingValor]);
 
   function setSupplementStock(name, qty) {
     setSettings((prev) => ({ ...prev, supplementStock: { ...prev.supplementStock, [name]: qty } }));
@@ -2378,6 +2456,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             ready={ready}
             logged={entry.sets}
             history={exerciseHistory(key)}
+            getHistory={exerciseHistory}
             onChange={(sets) => setExerciseSets(key, sets)}
             variation={settings.exerciseVariations[ex.id] || ex.variations[0]}
             onVariationChange={(v) => setVariation(ex.id, v)}
@@ -2425,6 +2504,7 @@ function ExerciseCard({
   ready,
   logged,
   history,
+  getHistory,
   onChange,
   variation,
   onVariationChange,
@@ -2533,6 +2613,53 @@ function ExerciseCard({
   const lastTwoHitTop = hitTop(last) && hitTop(prev);
   const isSubstituted = substitution !== plan.n;
 
+  // Carga equivalente ao trocar de variação: sem histórico na variação atual,
+  // olha o exercício "irmão" (o original ou outro equivalente) usado mais
+  // recentemente e sugere partir da mesma carga em vez de começar do zero.
+  const equivalentHint = useMemo(() => {
+    if (last || !getHistory) return null;
+    const siblingNames = [plan.n, ...(plan.equivalents || [])].filter((n) => n !== substitution);
+    let best = null;
+    siblingNames.forEach((name) => {
+      const h = getHistory(name).filter((entry) => entry.date !== selectedDate);
+      const entry = h[h.length - 1];
+      if (!entry) return;
+      if (!best || entry.date > best.date) best = { ...entry, name };
+    });
+    if (!best) return null;
+    const top = best.sets.reduce((b, s) => {
+      const w = parseFloat(s.weight) || 0;
+      const r = parseInt(s.reps, 10) || 0;
+      if (w === 0) return b;
+      if (!b || w > b.w) return { w, r };
+      return b;
+    }, null);
+    return top ? { name: best.name, w: top.w, r: top.r } : null;
+  }, [last, getHistory, plan.n, plan.equivalents, substitution, selectedDate]);
+
+  // Assimetria: só faz sentido em exercício unilateral com o lado marcado nas
+  // séries — compara a carga média de cada lado nas últimas 5 sessões (mais a
+  // de hoje, se já tiver lado marcado) e avisa quando a diferença passa de 15%.
+  const unilateral = isUnilateralName(effectiveName);
+  const asymmetryNote = useMemo(() => {
+    if (!unilateral) return null;
+    const recent = [...pastHistory.slice(-5), { date: selectedDate, sets }];
+    const bySide = { E: [], D: [] };
+    recent.forEach((entry) => {
+      (entry.sets || []).forEach((s) => {
+        const w = parseFloat(s.weight) || 0;
+        if (w > 0 && (s.side === "E" || s.side === "D")) bySide[s.side].push(w);
+      });
+    });
+    if (bySide.E.length < 2 || bySide.D.length < 2) return null;
+    const avgE = bySide.E.reduce((a, b) => a + b, 0) / bySide.E.length;
+    const avgD = bySide.D.reduce((a, b) => a + b, 0) / bySide.D.length;
+    const diffPct = (Math.abs(avgE - avgD) / Math.max(avgE, avgD)) * 100;
+    if (diffPct < 15) return null;
+    const weaker = avgE < avgD ? "E" : "D";
+    return `Lado ${weaker} em média ${diffPct.toFixed(0)}% mais fraco (${avgE.toFixed(1)}kg vs ${avgD.toFixed(1)}kg) nas últimas sessões.`;
+  }, [unilateral, pastHistory, selectedDate, sets]);
+
   // Preenche só as séries ainda vazias com o peso/reps da última sessão —
   // nunca sobrescreve o que você já digitou hoje.
   function repeatLastSession() {
@@ -2597,7 +2724,7 @@ function ExerciseCard({
   // 1RM estimado (Epley) a partir da série "top" de hoje — só aparece depois
   // que pelo menos uma série tem peso e reps preenchidos.
   const currentTopSet = topSet({ sets });
-  const currentE1RM = currentTopSet ? Math.round(estimate1RM(currentTopSet.w, currentTopSet.r)) : null;
+  const currentE1RM = currentTopSet ? Math.round(estimate1RMAvg(currentTopSet.w, currentTopSet.r)) : null;
 
   // Rampa de aquecimento baseada na carga de trabalho de hoje (ou, se ainda
   // não preencheu nada, na última sessão registrada).
@@ -2668,7 +2795,14 @@ function ExerciseCard({
             )}
           </div>
           {tip && showTip && <div className="tip-text">{tip}</div>}
-          {currentE1RM > 0 && <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg</div>}
+          {currentE1RM > 0 && (
+            <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg (méd. Epley/Brzycki/Lombardi)</div>
+          )}
+          {!last && equivalentHint && (
+            <div className="e1rm-note mono muted">
+              Sem histórico nessa variação — última vez em {equivalentHint.name}: ~{equivalentHint.w}kg × {equivalentHint.r}
+            </div>
+          )}
           <button
             type="button"
             className={"superset-toggle" + (isLinkedToNext ? " active" : "")}
@@ -2737,7 +2871,7 @@ function ExerciseCard({
           )}
         </div>
         {sets.map((s, i) => (
-          <div className="set-grid-row" key={i}>
+          <div className={"set-grid-row" + (unilateral ? " has-side" : "")} key={i}>
             <span className="mono muted">{i + 1}</span>
             <input
               className="input mono set-input"
@@ -2761,9 +2895,29 @@ function ExerciseCard({
                 commit(next);
               }}
             />
+            {unilateral && (
+              <button
+                type="button"
+                className="side-btn"
+                onClick={() => {
+                  const order = [null, "E", "D"];
+                  const next = sets.slice();
+                  next[i] = { ...next[i], side: order[(order.indexOf(s.side || null) + 1) % order.length] };
+                  commit(next);
+                }}
+                aria-label="Lado (esquerdo/direito)"
+              >
+                {s.side || "—"}
+              </button>
+            )}
           </div>
         ))}
       </div>
+      {asymmetryNote && (
+        <div className="hint mono" style={{ marginTop: 6, marginBottom: 0 }}>
+          <AlertTriangle size={11} style={{ verticalAlign: "-1px" }} /> {asymmetryNote}
+        </div>
+      )}
 
       <div className="rest-timer-row">
         {restLeft == null ? (
@@ -2886,6 +3040,12 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
     const previousMeals = meals;
     updateDay({ meals: meals.filter((_, i) => i !== idx) });
     showUndo?.("Refeição removida", () => updateDay({ meals: previousMeals }));
+  }
+
+  function setMealTiming(idx, timing) {
+    const next = meals.slice();
+    next[idx] = { ...next[idx], timing: next[idx].timing === timing ? null : timing };
+    updateDay({ meals: next });
   }
 
   // "Clonar refeições de ontem" — só aparece quando hoje ainda não tem
@@ -3131,12 +3291,35 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
           {meals.map((m, i) => (
             <div className="meal-row" key={i}>
               <div>
-                <div className="meal-name">{m.name}</div>
+                <div className="meal-name">
+                  {m.name}
+                  {m.timing && <span className="muted mono"> · {m.timing === "pre" ? "pré-treino" : "pós-treino"}</span>}
+                </div>
                 <div className="muted mono meal-macros">
                   {Math.round(m.protein)}g P · {Math.round(m.carb)}g C · {Math.round(m.fat)}g G ·{" "}
                   {kcal(m.protein, m.carb, m.fat)} kcal
                 </div>
               </div>
+              {dietCat === "Treino" && (
+                <div style={{ display: "flex", gap: 4 }}>
+                  <button
+                    type="button"
+                    className={"rir-felt-chip" + (m.timing === "pre" ? " active" : "")}
+                    style={{ width: "auto", padding: "0 8px" }}
+                    onClick={() => setMealTiming(i, "pre")}
+                  >
+                    Pré
+                  </button>
+                  <button
+                    type="button"
+                    className={"rir-felt-chip" + (m.timing === "pos" ? " active" : "")}
+                    style={{ width: "auto", padding: "0 8px" }}
+                    onClick={() => setMealTiming(i, "pos")}
+                  >
+                    Pós
+                  </button>
+                </div>
+              )}
               <button className="icon-btn" onClick={() => removeMeal(i)} aria-label="Remover">
                 <X size={16} />
               </button>
@@ -3209,7 +3392,7 @@ function FavoriteRow({ fav, onAdd, onRename, onDelete }) {
 }
 
 // ---------------- Progresso ----------------
-function ProgressoTab({ logs, settings }) {
+function ProgressoTab({ logs, settings, setSettings }) {
   const bwData = Object.entries(logs)
     .filter(([, v]) => v.bodyweight != null)
     .sort(([a], [b]) => (a < b ? -1 : 1))
@@ -3231,7 +3414,21 @@ function ProgressoTab({ logs, settings }) {
   );
   const plateau = useMemo(() => computePlateau(logs, settings.goalWeight), [logs, settings.goalWeight]);
   const tdee = useMemo(() => computeTDEE(logs), [logs]);
+  // Guarda o TDEE calculado como "linha de base" — na primeira vez que houver
+  // dado suficiente pra calcular, e sempre que o usuário aceitar uma nova
+  // atualização. Compara contra ela pra avisar quando o gasto real mudou o
+  // bastante pra valer a pena reajustar a meta (perder peso reduz o TDEE).
+  useEffect(() => {
+    if (!tdee || settings.lastTDEE) return;
+    setSettings((prev) => ({ ...prev, lastTDEE: { value: tdee.tdee, date: todayISO() } }));
+  }, [tdee, settings.lastTDEE, setSettings]);
+  const tdeeShiftPct = tdee && settings.lastTDEE ? ((tdee.tdee - settings.lastTDEE.value) / settings.lastTDEE.value) * 100 : 0;
+  const showTdeeShift = tdee && settings.lastTDEE && Math.abs(tdeeShiftPct) >= 8;
+  function acceptNewTDEE() {
+    setSettings((prev) => ({ ...prev, lastTDEE: { value: tdee.tdee, date: todayISO() } }));
+  }
   const stagnation = useMemo(() => computeStagnation(logs), [logs]);
+  const overtraining = useMemo(() => computeOvertrainingRisk(logs), [logs]);
   const bodyFat = useMemo(() => {
     const withNeck = Object.entries(logs)
       .filter(([, v]) => v?.measurements?.waist != null && v?.measurements?.neck != null)
@@ -3269,7 +3466,13 @@ function ProgressoTab({ logs, settings }) {
 
       {tdee && <TDEECard tdee={tdee} />}
 
+      {showTdeeShift && <TDEEShiftCard tdee={tdee} baseline={settings.lastTDEE} pct={tdeeShiftPct} onAccept={acceptNewTDEE} />}
+
       {stagnation && <DeloadCard stagnation={stagnation} />}
+
+      {overtraining && <OvertrainingCard risk={overtraining} />}
+
+      <InjuryTracker injuries={settings.injuries} setSettings={setSettings} />
 
       <div className="card">
         <div className="card-head">Peso corporal</div>
@@ -3823,6 +4026,114 @@ function BodyFatCard({ bodyFat }) {
   );
 }
 
+function TDEEShiftCard({ tdee, baseline, pct, onAccept }) {
+  const up = pct > 0;
+  return (
+    <div className="card">
+      <div className="card-head">TDEE mudou</div>
+      <div className="phase-stat-row">
+        <span className="muted">
+          De ~{baseline.value} pra ~{tdee.tdee} kcal/dia
+        </span>
+        <span className="mono" style={{ fontWeight: 600, color: up ? "var(--push)" : "var(--legs)" }}>
+          {up ? "+" : ""}
+          {pct.toFixed(0)}%
+        </span>
+      </div>
+      <p className="hint">
+        {up
+          ? "Seu gasto real subiu — talvez dê pra comer um pouco mais sem perder o ritmo."
+          : "Seu gasto real caiu (comum conforme o peso desce) — talvez valha reduzir um pouco as calorias pra manter o déficit."}
+      </p>
+      <button className="btn-secondary" onClick={onAccept}>
+        Atualizar linha de base
+      </button>
+    </div>
+  );
+}
+
+function OvertrainingCard({ risk }) {
+  return (
+    <div className="card">
+      <div className="card-head">Risco de overtraining</div>
+      <div className="suggestion deload" style={{ marginTop: 0 }}>
+        <AlertTriangle size={13} /> Volume subiu {risk.volumeJumpPct}% essa semana, com RPE médio {risk.avgRPE} e só{" "}
+        {risk.avgSleep}h de sono — combinação que costuma preceder fadiga acumulada.
+      </div>
+      <p className="hint" style={{ marginBottom: 0 }}>
+        Vale segurar o volume essa semana e priorizar o sono antes de empilhar mais carga.
+      </p>
+    </div>
+  );
+}
+
+const INJURY_STATUS_CYCLE = ["ativa", "recuperando", "resolvida"];
+const INJURY_STATUS_LABEL = { ativa: "Ativa", recuperando: "Recuperando", resolvida: "Resolvida" };
+// Separado do "Senti dor/desconforto aqui" por série (que é automático e some
+// no histórico do dia) — isso aqui é uma lista mantida à mão, só pra lesão de
+// verdade que vale acompanhar por semanas/meses até resolver.
+function InjuryTracker({ injuries, setSettings }) {
+  const list = injuries || [];
+  const [name, setName] = useState("");
+
+  function addInjury() {
+    if (!name.trim()) return;
+    const injury = { id: Date.now().toString(36), name: name.trim(), startDate: todayISO(), status: "ativa" };
+    setSettings((prev) => ({ ...prev, injuries: [...(prev.injuries || []), injury] }));
+    setName("");
+  }
+  function cycleStatus(id) {
+    setSettings((prev) => ({
+      ...prev,
+      injuries: (prev.injuries || []).map((inj) =>
+        inj.id === id
+          ? { ...inj, status: INJURY_STATUS_CYCLE[(INJURY_STATUS_CYCLE.indexOf(inj.status) + 1) % INJURY_STATUS_CYCLE.length] }
+          : inj
+      ),
+    }));
+  }
+  function removeInjury(id) {
+    setSettings((prev) => ({ ...prev, injuries: (prev.injuries || []).filter((inj) => inj.id !== id) }));
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">Histórico de lesões</div>
+      {list.length === 0 && (
+        <p className="muted">Nenhuma lesão registrada — adiciona só o que for real de acompanhar, não toda dorzinha pontual.</p>
+      )}
+      {list.map((inj) => (
+        <div className="meal-row" key={inj.id}>
+          <div>
+            <div className="meal-name">{inj.name}</div>
+            <div className="muted mono meal-macros">desde {fmtDateLabel(inj.startDate)}</div>
+          </div>
+          <button
+            type="button"
+            className={"notif-pref-toggle" + (inj.status !== "resolvida" ? " active" : "")}
+            onClick={() => cycleStatus(inj.id)}
+          >
+            {INJURY_STATUS_LABEL[inj.status]}
+          </button>
+          <button className="icon-btn" onClick={() => removeInjury(inj.id)} aria-label="Remover">
+            <X size={16} />
+          </button>
+        </div>
+      ))}
+      <input
+        className="input"
+        placeholder="Nome da lesão (ex: Ombro direito)"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        style={{ marginTop: list.length ? 10 : 0 }}
+      />
+      <button className="btn-secondary" onClick={addInjury} disabled={!name.trim()} style={{ marginTop: 8 }}>
+        <Plus size={15} /> Adicionar lesão
+      </button>
+    </div>
+  );
+}
+
 function PhaseComparisonCard({ logs, phases }) {
   const sorted = [...phases].sort((a, b) => (a.start < b.start ? -1 : 1));
   return (
@@ -4093,7 +4404,7 @@ function ExerciseProgressCard({ logs }) {
           fullDate: d,
           carga: top?.w || 0,
           reps: top?.r || 0,
-          e1rm: top ? Math.round(estimate1RM(top.w, top.r)) : 0,
+          e1rm: top ? Math.round(estimate1RMAvg(top.w, top.r)) : 0,
         };
       });
   }, [logs, selected]);
@@ -4530,6 +4841,32 @@ function SiriShortcutsCard() {
           <div className="meal-name">{s.label}</div>
           <button className="btn-secondary" onClick={() => copyLink(s.param)} style={{ padding: "6px 10px" }}>
             {copied === s.param ? "Copiado!" : "Copiar link"}
+          </button>
+        </div>
+      ))}
+      <p className="muted export-hint" style={{ marginTop: 14 }}>
+        Sincronizar peso/sono do Apple Saúde: no Atalhos, usa "Obter amostra de saúde" (Peso ou Sono) e depois "Abrir
+        URL" colando o valor lido dentro do link — sem precisar digitar nada na hora.
+      </p>
+      {[
+        { label: "Base p/ peso (do Apple Saúde)", param: "peso" },
+        { label: "Base p/ sono (do Apple Saúde)", param: "sono" },
+      ].map((s) => (
+        <div className="meal-row" key={s.param}>
+          <div className="meal-name">{s.label}</div>
+          <button
+            className="btn-secondary"
+            onClick={async () => {
+              const url = `${origin}/?tab=hoje&acao=${s.param}&valor=`;
+              try {
+                await navigator.clipboard.writeText(url);
+                setCopied(s.param);
+                setTimeout(() => setCopied(""), 2000);
+              } catch (e) {}
+            }}
+            style={{ padding: "6px 10px" }}
+          >
+            {copied === s.param ? "Copiado!" : "Copiar base"}
           </button>
         </div>
       ))}
@@ -5630,7 +5967,12 @@ button:active:not(:disabled){transform:scale(0.96);}
   display:grid;grid-template-columns:32px 1fr 1fr;gap:8px;align-items:center;margin-bottom:8px;
 }
 .set-grid-head{font-size:11px;grid-template-columns:32px 1fr 1fr auto;}
+.set-grid-row.has-side{grid-template-columns:32px 1fr 1fr auto;}
 .set-input{padding:12px 9px;text-align:center;font-size:calc(15px * var(--font-scale, 1));}
+.side-btn{
+  background:var(--surface-2);border:1px solid var(--border);color:var(--muted);border-radius:8px;
+  width:32px;height:38px;font-size:12px;cursor:pointer;font-family:'IBM Plex Mono',monospace;flex-shrink:0;
+}
 
 .macro-inputs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:10px 0;}
 .mode-toggle{display:flex;gap:6px;margin-bottom:12px;}
