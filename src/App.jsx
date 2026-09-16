@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff, Mic } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff, Mic, Coffee, Activity, Percent, PauseCircle, Gauge } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 import { isPushSupported, getPushPermission, isPushEnabled, enablePush, disablePush } from "./push.js";
 
@@ -168,10 +168,14 @@ const DEFAULT_SETTINGS = {
   waterAuto: true,
   supersetLinks: {},
   supplementList: ["Creatina", "Whey protein", "Multivitamínico"],
+  supplementStock: {},
   notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true, medidas: true, creatina: true },
   notificationTimes: { treino: 12, peso: 9, sync: 20, agua: 15, medidas: 20, creatina: 10 },
+  notificationsPausedUntil: null,
   customTemplates: [],
   fontScale: 1,
+  heightCm: null,
+  caffeineDoseMg: 80,
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -290,6 +294,21 @@ function computeWaterTargetCups(weightKg, training) {
   if (!weightKg) return null;
   const ml = weightKg * 35 + (training ? 500 : 0);
   return Math.max(1, Math.round(ml / 250));
+}
+// MET (equivalente metabólico) por tipo de cardio — kcal = MET * peso(kg) *
+// horas. Valores de referência aproximados, não medição real de esforço.
+const CARDIO_TYPES = [
+  { key: "corrida", label: "Corrida", met: 9.8 },
+  { key: "bike", label: "Bike", met: 7.5 },
+  { key: "caminhada", label: "Caminhada rápida", met: 4.3 },
+  { key: "natacao", label: "Natação", met: 7.0 },
+  { key: "eliptico", label: "Elíptico", met: 5.0 },
+  { key: "pular-corda", label: "Pular corda", met: 10.0 },
+  { key: "outro", label: "Outro", met: 6.0 },
+];
+function estimateCardioKcal(typeKey, minutes, weightKg) {
+  const type = CARDIO_TYPES.find((t) => t.key === typeKey) || CARDIO_TYPES[CARDIO_TYPES.length - 1];
+  return Math.round(type.met * (weightKg || 75) * (minutes / 60));
 }
 const kcal = (p, c, f) => Math.round(p * 4 + c * 4 + f * 9);
 const computeFromFood = (food, g) => ({
@@ -515,6 +534,85 @@ function computeTDEE(logs) {
   const tdee = avgKcal - (weightChangeKg * 7700) / daysSpan;
   if (tdee < 800 || tdee > 6000) return null; // fora da faixa plausível, dado ruim demais pra confiar
   return { tdee: Math.round(tdee), avgKcal: Math.round(avgKcal), daysUsed: daysWithMeals.length, weightChangeKg, daysSpan: Math.round(daysSpan) };
+}
+
+// Detecção de estagnação — resumo de painel do mesmo critério já usado dentro
+// de cada ExerciseCard (mesma carga nas últimas 3 sessões, sem subir as reps):
+// aqui agregado pra TODOS os exercícios de uma vez, então dá pra ver de
+// relance na aba Progresso sem precisar abrir exercício por exercício.
+function computeStagnation(logs) {
+  const days = Object.entries(logs).sort(([a], [b]) => (a < b ? -1 : 1));
+  const byExercise = {};
+  days.forEach(([, v]) => {
+    Object.entries(v?.exercises || {}).forEach(([name, ex]) => {
+      const sets = ex?.sets;
+      if (!sets?.length) return;
+      const top = sets.reduce((best, s) => {
+        const w = parseFloat(s.weight) || 0;
+        const r = parseInt(s.reps, 10) || 0;
+        if (w === 0) return best;
+        if (!best || w > best.w || (w === best.w && r > best.r)) return { w, r };
+        return best;
+      }, null);
+      if (top) (byExercise[name] = byExercise[name] || []).push(top);
+    });
+  });
+  const stalled = [];
+  Object.entries(byExercise).forEach(([name, tops]) => {
+    const last3 = tops.slice(-3);
+    const isStagnant =
+      last3.length === 3 &&
+      last3[0].w === last3[1].w &&
+      last3[1].w === last3[2].w &&
+      last3[2].r <= last3[0].r &&
+      last3[2].r <= last3[1].r;
+    if (isStagnant) stalled.push({ name, weight: last3[2].w, reps: last3[2].r });
+  });
+  return stalled.length ? stalled : null;
+}
+
+// % de gordura estimado pela fórmula da Marinha americana — só cintura,
+// pescoço e altura, sem precisar de paquímetro. É uma estimativa (erro típico
+// de ±3-4pp), não substitui uma bioimpedância ou dobra cutânea de verdade.
+function computeBodyFatNavy({ waistCm, neckCm, heightCm, sex = "m" }) {
+  if (!waistCm || !neckCm || !heightCm || waistCm <= neckCm) return null;
+  const bf =
+    495 / (1.0324 - 0.19077 * Math.log10(waistCm - neckCm) + 0.15456 * Math.log10(heightCm)) - 450;
+  if (!isFinite(bf) || bf <= 0 || bf > 60) return null;
+  return Math.round(bf * 10) / 10;
+}
+
+// Banco calórico da semana (dieta flexível): soma meta vs consumido só dos
+// dias já registrados (com refeição lançada) na semana corrente até hoje —
+// dias sem nenhuma refeição não contam, pra não inflar o saldo com dias que o
+// usuário simplesmente não abriu o app.
+function computeWeeklyCalorieBank(logs, settings, selectedDate) {
+  const ref = new Date(selectedDate + "T12:00:00");
+  const dow = ref.getDay();
+  const monday = new Date(ref);
+  monday.setDate(ref.getDate() - ((dow + 6) % 7));
+  let bank = 0;
+  let daysCounted = 0;
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    const iso = todayISO(d);
+    if (iso > selectedDate) break;
+    const entry = logs[iso];
+    if (!entry?.meals?.length) continue;
+    const dow2 = d.getDay();
+    const scheduled = (settings.schedule && settings.schedule[String(dow2)]) || "Descanso";
+    const dayType = entry.dayTypeOverride || scheduled;
+    const cat = isTrainingDay(dayType) ? "Treino" : "Descanso";
+    const target = settings.macroTargets[cat];
+    const fatTarget = cat === "Treino" ? settings.fatTraining : settings.fatRest;
+    const targetKcal = kcal(target.protein, target.carb, fatTarget);
+    const gotKcal = entry.meals.reduce((s, m) => s + kcal(m.protein, m.carb, m.fat), 0);
+    bank += targetKcal - gotKcal;
+    daysCounted++;
+  }
+  if (daysCounted === 0) return null;
+  return { bank: Math.round(bank), daysCounted };
 }
 
 // 1RM estimado pela fórmula de Epley — mais estável que olhar só a carga
@@ -1021,6 +1119,9 @@ export default function App() {
     const qs = new URLSearchParams(window.location.search).get("tab");
     return VALID_TABS.includes(qs) ? qs : "hoje";
   });
+  // Ação rápida via atalho do iOS (Siri): ?tab=hoje&acao=agua|cafe|creatina|peso
+  // — dá pra amarrar cada uma num comando de voz no app Atalhos.
+  const [pendingAction] = useState(() => new URLSearchParams(window.location.search).get("acao"));
   const [selectedDate, setSelectedDate] = useState(todayISO());
   const [logs, setLogs] = useState({});
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -1241,6 +1342,7 @@ export default function App() {
         {tab === "hoje" && (
           <HojeTab
             settings={settings}
+            setSettings={setSettings}
             selectedDate={selectedDate}
             setSelectedDate={setSelectedDate}
             dayType={dayType}
@@ -1252,6 +1354,7 @@ export default function App() {
             ready={ready}
             showUndo={showUndo}
             logs={logs}
+            pendingAction={pendingAction}
           />
         )}
         {tab === "treino" && (
@@ -1500,12 +1603,33 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 // ---------------- Hoje ----------------
-function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready, showUndo, logs }) {
+function HojeTab({ settings, setSettings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready, showUndo, logs, pendingAction }) {
   const [switching, setSwitching] = useState(false);
   const training = isTrainingDay(dayType);
   const latestWeight = getLatestBodyweight(logs, settings.startWeight);
   const autoWaterCups = settings.waterAuto ? computeWaterTargetCups(latestWeight, training) : null;
   const waterTargetCups = autoWaterCups || settings.waterTarget;
+
+  // Ações rápidas via URL (atalho iOS "Ei Siri, registra água") — dispara uma
+  // vez só quando a tela carrega já pronta, e não repete em re-renders.
+  const ranActionRef = useRef(false);
+  const bwInputRef = useRef(null);
+  useEffect(() => {
+    if (!ready || !pendingAction || ranActionRef.current) return;
+    ranActionRef.current = true;
+    if (pendingAction === "agua") updateDay({ water: (dayEntry.water || 0) + 1 });
+    else if (pendingAction === "cafe") updateDay({ caffeine: (dayEntry.caffeine || 0) + 1 });
+    else if (pendingAction === "creatina") {
+      updateDay({ supplements: { ...(dayEntry.supplements || {}), Creatina: true } });
+    } else if (pendingAction === "peso") {
+      setTimeout(() => bwInputRef.current?.focus(), 150);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, pendingAction]);
+
+  function setSupplementStock(name, qty) {
+    setSettings((prev) => ({ ...prev, supplementStock: { ...prev.supplementStock, [name]: qty } }));
+  }
   const target = settings.macroTargets[dietCat];
   const fatTarget = training ? settings.fatTraining : settings.fatRest;
   const targetKcal = kcal(target.protein, target.carb, fatTarget);
@@ -1630,6 +1754,7 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
           startWeight={settings.startWeight}
           selectedDate={selectedDate}
           ready={ready}
+          inputRef={bwInputRef}
         />
         <div className="hint">Sempre em jejum, ao acordar, antes de comer/beber — mantém o padrão pra comparação real.</div>
       </div>
@@ -1655,8 +1780,24 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
       </div>
 
       <div className="card">
+        <div className="card-head">Cafeína</div>
+        <CaffeineCounter dayEntry={dayEntry} updateDay={updateDay} doseMg={settings.caffeineDoseMg} />
+      </div>
+
+      <div className="card">
+        <div className="card-head">Cardio</div>
+        <CardioLogCard dayEntry={dayEntry} updateDay={updateDay} weightKg={latestWeight} />
+      </div>
+
+      <div className="card">
         <div className="card-head">Suplementos</div>
-        <SupplementChecklist dayEntry={dayEntry} updateDay={updateDay} list={settings.supplementList} />
+        <SupplementChecklist
+          dayEntry={dayEntry}
+          updateDay={updateDay}
+          list={settings.supplementList}
+          stock={settings.supplementStock}
+          onStockChange={setSupplementStock}
+        />
       </div>
 
       <div className="card">
@@ -1674,6 +1815,7 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
 
 const MEASUREMENT_FIELDS = [
   { key: "waist", label: "Cintura" },
+  { key: "neck", label: "Pescoço" },
   { key: "arm", label: "Braço" },
   { key: "chest", label: "Peito" },
   { key: "thigh", label: "Coxa" },
@@ -1788,27 +1930,153 @@ function WaterCounter({ dayEntry, updateDay, target }) {
   );
 }
 
-function SupplementChecklist({ dayEntry, updateDay, list }) {
+// Doses de cafeína no dia — mesmo padrão do contador de água, mas sem meta
+// (o objetivo aqui é ter noção do total, não bater um alvo). Acima de 400mg
+// (~5 doses de 80mg) mostra um aviso suave, que é o teto geralmente citado
+// como seguro pra adulto saudável.
+function CaffeineCounter({ dayEntry, updateDay, doseMg }) {
+  const doses = dayEntry.caffeine || 0;
+  const mg = doses * (doseMg || 80);
+  const over = mg > 400;
+  return (
+    <>
+      <div className="water-row">
+        <button
+          className="water-btn"
+          onClick={() => updateDay({ caffeine: Math.max(0, doses - 1) })}
+          disabled={doses === 0}
+          aria-label="Remover uma dose"
+        >
+          <Minus size={16} />
+        </button>
+        <div className="water-count">
+          <Coffee size={16} />
+          <span className="mono">
+            {doses} <span className="muted">dose{doses === 1 ? "" : "s"} (~{mg}mg)</span>
+          </span>
+        </div>
+        <button className="water-btn" onClick={() => updateDay({ caffeine: doses + 1 })} aria-label="Adicionar uma dose">
+          <Plus size={16} />
+        </button>
+      </div>
+      {over && (
+        <div className="hint" style={{ marginTop: 6, marginBottom: 0, color: "var(--warn, #d98c3f)" }}>
+          Passou de 400mg hoje — teto geralmente citado como seguro pra um adulto saudável.
+        </div>
+      )}
+    </>
+  );
+}
+
+function CardioLogCard({ dayEntry, updateDay, weightKg }) {
+  const entries = dayEntry.cardio || [];
+  const [type, setType] = useState(CARDIO_TYPES[0].key);
+  const [minutes, setMinutes] = useState("");
+  const [distance, setDistance] = useState("");
+
+  function addEntry() {
+    const min = parseFloat(minutes);
+    if (!min || min <= 0) return;
+    const kcalBurned = estimateCardioKcal(type, min, weightKg);
+    const entry = { type, minutes: min, distance: distance ? parseFloat(distance) : null, kcal: kcalBurned };
+    updateDay({ cardio: [...entries, entry] });
+    setMinutes("");
+    setDistance("");
+  }
+  function removeEntry(idx) {
+    updateDay({ cardio: entries.filter((_, i) => i !== idx) });
+  }
+  const totalKcal = entries.reduce((s, e) => s + e.kcal, 0);
+
+  return (
+    <>
+      {entries.map((e, i) => {
+        const typeLabel = CARDIO_TYPES.find((t) => t.key === e.type)?.label || e.type;
+        return (
+          <div className="meal-row" key={i}>
+            <div>
+              <div className="meal-name">
+                {typeLabel} — {e.minutes}min{e.distance ? ` · ${e.distance}km` : ""}
+              </div>
+              <div className="muted mono meal-macros">~{e.kcal} kcal</div>
+            </div>
+            <button className="icon-btn" onClick={() => removeEntry(i)} aria-label="Remover">
+              <X size={16} />
+            </button>
+          </div>
+        );
+      })}
+      {entries.length > 0 && (
+        <div className="hint mono" style={{ marginTop: entries.length ? 0 : undefined }}>
+          Total: ~{totalKcal} kcal queimadas em cardio hoje
+        </div>
+      )}
+      <div className="macro-inputs" style={{ gridTemplateColumns: "1.3fr 1fr 1fr", margin: "10px 0 0" }}>
+        <select className="select" value={type} onChange={(e) => setType(e.target.value)}>
+          {CARDIO_TYPES.map((t) => (
+            <option key={t.key} value={t.key}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+        <input
+          className="input mono"
+          type="text"
+          inputMode="numeric"
+          placeholder="min"
+          value={minutes}
+          onChange={(e) => setMinutes(e.target.value.replace(/\D/g, ""))}
+        />
+        <input
+          className="input mono"
+          type="text"
+          inputMode="decimal"
+          placeholder="km (opc.)"
+          value={distance}
+          onChange={(e) => setDistance(sanitizeDecimal(e.target.value))}
+        />
+      </div>
+      <button className="btn-secondary" onClick={addEntry} disabled={!minutes} style={{ marginTop: 8 }}>
+        <Plus size={15} /> Registrar cardio
+      </button>
+    </>
+  );
+}
+
+function SupplementChecklist({ dayEntry, updateDay, list, stock, onStockChange }) {
   const taken = dayEntry.supplements || {};
   function toggle(name) {
-    updateDay({ supplements: { ...taken, [name]: !taken[name] } });
+    const wasTaken = !!taken[name];
+    updateDay({ supplements: { ...taken, [name]: !wasTaken } });
+    if (onStockChange && stock?.[name] != null) {
+      onStockChange(name, wasTaken ? stock[name] + 1 : Math.max(0, stock[name] - 1));
+    }
   }
   if (!list || list.length === 0) {
     return <p className="muted">Nenhum suplemento cadastrado — adicione em Configurações.</p>;
   }
+  const lowStock = list.filter((name) => stock?.[name] != null && stock[name] <= 5);
   return (
-    <div className="supplement-list">
-      {list.map((name) => (
-        <button
-          key={name}
-          type="button"
-          className={"supplement-chip" + (taken[name] ? " active" : "")}
-          onClick={() => toggle(name)}
-        >
-          <Pill size={13} /> {name}
-        </button>
-      ))}
-    </div>
+    <>
+      <div className="supplement-list">
+        {list.map((name) => (
+          <button
+            key={name}
+            type="button"
+            className={"supplement-chip" + (taken[name] ? " active" : "")}
+            onClick={() => toggle(name)}
+          >
+            <Pill size={13} /> {name}
+            {stock?.[name] != null && <span className="muted mono" style={{ marginLeft: 5 }}>({stock[name]})</span>}
+          </button>
+        ))}
+      </div>
+      {lowStock.length > 0 && (
+        <div className="hint" style={{ marginTop: 6, marginBottom: 0, color: "var(--warn, #d98c3f)" }}>
+          Acabando: {lowStock.map((n) => `${n} (${stock[n]} dose${stock[n] === 1 ? "" : "s"})`).join(", ")} — hora de repor.
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1903,7 +2171,7 @@ function MacroBar({ label, got, target, color, unit }) {
   );
 }
 
-function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate, ready }) {
+function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate, ready, inputRef }) {
   const [val, setVal] = useState(dayEntry.bodyweight ?? "");
   // Recarrega o campo quando o DIA muda ou quando os dados terminam de
   // carregar do storage (`ready`) — não fica de olho em dayEntry.bodyweight
@@ -1918,6 +2186,7 @@ function BodyweightQuickLog({ dayEntry, updateDay, startWeight, selectedDate, re
   return (
     <div className="bw-row">
       <input
+        ref={inputRef}
         className="input mono"
         type="text"
         inputMode="decimal"
@@ -2081,6 +2350,21 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
         <button type="button" className="treino-toolbar-btn" onClick={shareWorkoutText}>
           <Share2 size={13} /> {shareMsg || "Compartilhar treino"}
         </button>
+      </div>
+      <div className="rir-felt-row">
+        <span className="muted mono rir-felt-label">
+          <Gauge size={12} style={{ verticalAlign: "-2px" }} /> RPE da sessão:
+        </span>
+        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+          <button
+            key={n}
+            type="button"
+            className={"rir-felt-chip" + (dayEntry.sessionRPE === n ? " active" : "")}
+            onClick={() => updateDay({ sessionRPE: dayEntry.sessionRPE === n ? null : n })}
+          >
+            {n}
+          </button>
+        ))}
       </div>
       {orderedExercises.map((ex, i) => {
         const key = effectiveName(ex);
@@ -2556,6 +2840,11 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
     carb: Math.max(0, target.carb - got.carb),
     fat: Math.max(0, fatTarget - got.fat),
   };
+  const cardioKcal = (dayEntry.cardio || []).reduce((s, e) => s + e.kcal, 0);
+  const weeklyBank = useMemo(
+    () => computeWeeklyCalorieBank(logs, settings, selectedDate),
+    [logs, settings, selectedDate]
+  );
 
   const [mode, setMode] = useState("food"); // "food" ou "manual"
   const [foodQuery, setFoodQuery] = useState("");
@@ -2658,12 +2947,34 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
         <div className="remaining mono muted">
           Falta: {Math.round(remaining.protein)}g P · {Math.round(remaining.carb)}g C · {Math.round(remaining.fat)}g G
         </div>
+        {cardioKcal > 0 && (
+          <div className="hint mono" style={{ marginBottom: 0 }}>
+            <Activity size={11} style={{ verticalAlign: "-1px" }} /> Líquido (comida − cardio): {kcal(got.protein, got.carb, got.fat) - cardioKcal} kcal
+          </div>
+        )}
         {meals.length === 0 && yesterdayMeals.length > 0 && (
           <button className="btn-secondary" onClick={cloneYesterdayMeals}>
             <Repeat size={15} /> Clonar refeições de ontem
           </button>
         )}
       </div>
+
+      {weeklyBank && (
+        <div className="card">
+          <div className="card-head">Banco calórico da semana</div>
+          <div className="kcal-row">
+            <span className="mono" style={{ color: weeklyBank.bank >= 0 ? "var(--push)" : "var(--legs)" }}>
+              {weeklyBank.bank >= 0 ? "+" : ""}
+              {weeklyBank.bank} kcal
+            </span>
+          </div>
+          <p className="hint" style={{ marginBottom: 0 }}>
+            {weeklyBank.bank >= 0
+              ? `Sobrou déficit em ${weeklyBank.daysCounted} dia(s) registrado(s) essa semana — dá pra "gastar" isso num dia de folga.`
+              : `Passou da meta em ${weeklyBank.daysCounted} dia(s) essa semana — considera compensar nos próximos.`}
+          </p>
+        </div>
+      )}
 
       {suggestions.length > 0 && (
         <div className="card">
@@ -2920,6 +3231,15 @@ function ProgressoTab({ logs, settings }) {
   );
   const plateau = useMemo(() => computePlateau(logs, settings.goalWeight), [logs, settings.goalWeight]);
   const tdee = useMemo(() => computeTDEE(logs), [logs]);
+  const stagnation = useMemo(() => computeStagnation(logs), [logs]);
+  const bodyFat = useMemo(() => {
+    const withNeck = Object.entries(logs)
+      .filter(([, v]) => v?.measurements?.waist != null && v?.measurements?.neck != null)
+      .sort(([a], [b]) => (a < b ? -1 : 1));
+    if (!withNeck.length) return null;
+    const [, latest] = withNeck[withNeck.length - 1];
+    return computeBodyFatNavy({ waistCm: latest.measurements.waist, neckCm: latest.measurements.neck, heightCm: settings.heightCm });
+  }, [logs, settings.heightCm]);
   const prHistory = useMemo(() => computePRHistory(logs), [logs]);
   const weekSummary = useMemo(() => computeWeekSummary(logs, settings, prHistory), [logs, settings, prHistory]);
   const monthSummary = useMemo(() => computeMonthSummary(logs, settings, prHistory), [logs, settings, prHistory]);
@@ -2948,6 +3268,8 @@ function ProgressoTab({ logs, settings }) {
       {plateau && <PlateauCard plateau={plateau} />}
 
       {tdee && <TDEECard tdee={tdee} />}
+
+      {stagnation && <DeloadCard stagnation={stagnation} />}
 
       <div className="card">
         <div className="card-head">Peso corporal</div>
@@ -3024,6 +3346,8 @@ function ProgressoTab({ logs, settings }) {
       <PhotoCompareCard logs={logs} />
 
       <MeasurementsProgressCard logs={logs} />
+
+      {bodyFat != null && <BodyFatCard bodyFat={bodyFat} />}
 
       <ExerciseProgressCard logs={logs} />
 
@@ -3456,6 +3780,44 @@ function TDEECard({ tdee }) {
         registrado(s) nos últimos {tdee.daysSpan} dias, e {tdee.weightChangeKg <= 0 ? "perdeu" : "ganhou"}{" "}
         {Math.abs(tdee.weightChangeKg).toFixed(1)}kg nesse intervalo — mais confiável que qualquer fórmula de bolso,
         porque usa o comportamento real do seu corpo.
+      </p>
+    </div>
+  );
+}
+
+function DeloadCard({ stagnation }) {
+  return (
+    <div className="card">
+      <div className="card-head">Possível estagnação</div>
+      {stagnation.map((s) => (
+        <div className="suggestion deload" style={{ marginTop: 0 }} key={s.name}>
+          <Gauge size={13} /> {s.name}: estagnado em {s.weight}kg × {s.reps} nas últimas 3 sessões.
+        </div>
+      ))}
+      <p className="hint" style={{ marginBottom: 0 }}>
+        Considera uma semana de deload (~40-50% da carga) antes de tentar progredir de novo — mesmo aviso que aparece
+        dentro do exercício, só que reunido aqui pra ver todos de uma vez.
+      </p>
+    </div>
+  );
+}
+
+function BodyFatCard({ bodyFat }) {
+  return (
+    <div className="card">
+      <div className="card-head">
+        <Percent size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
+        % de gordura estimado
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Fórmula da Marinha (cintura + pescoço + altura)</span>
+        <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>
+          ~{bodyFat}%
+        </span>
+      </div>
+      <p className="hint" style={{ marginBottom: 0 }}>
+        Estimativa (erro típico de ±3-4 pontos) — usa a cintura e o pescoço mais recentes registrados em Medidas
+        corporais, mais a altura cadastrada em Configurações. Não substitui bioimpedância ou dobra cutânea de verdade.
       </p>
     </div>
   );
@@ -4096,6 +4458,81 @@ function NotificationsCard({ session, local, setLocal }) {
           );
         })}
       </div>
+      <VacationModeToggle local={local} setLocal={setLocal} />
+    </div>
+  );
+}
+
+// Pausa TODAS as notificações de uma vez por N dias (viagem, período sem
+// treinar, etc.) sem precisar desligar cada tipo manualmente — e sem
+// esquecer ligado depois, porque some sozinho na data marcada.
+function VacationModeToggle({ local, setLocal }) {
+  const pausedUntil = local.notificationsPausedUntil;
+  const isPaused = pausedUntil && pausedUntil >= todayISO();
+  if (isPaused) {
+    return (
+      <div className="reminder-banner" style={{ marginTop: 12 }}>
+        <PauseCircle size={14} />
+        <span>Notificações pausadas até {fmtDateLabel(pausedUntil)}.</span>
+        <button type="button" className="link-btn" onClick={() => setLocal({ ...local, notificationsPausedUntil: null })}>
+          Retomar agora
+        </button>
+      </div>
+    );
+  }
+  function pauseFor(days) {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    setLocal({ ...local, notificationsPausedUntil: todayISO(d) });
+  }
+  return (
+    <div className="treino-toolbar" style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+      <button type="button" className="treino-toolbar-btn" onClick={() => pauseFor(7)}>
+        <PauseCircle size={13} /> Pausar 7 dias
+      </button>
+      <button type="button" className="treino-toolbar-btn" onClick={() => pauseFor(14)}>
+        <PauseCircle size={13} /> Pausar 14 dias
+      </button>
+    </div>
+  );
+}
+
+// Não dá pra registrar um "App Intent" de verdade sem ser um app nativo, mas
+// um PWA aceita ação por URL — então basta o usuário criar um Atalho no app
+// Atalhos do iPhone com a ação "Abrir URL" apontando pra um desses links e
+// amarrar numa frase da Siri. Cada link já executa a ação sozinho ao abrir.
+const SIRI_SHORTCUTS = [
+  { label: "Registrar água (+1 copo)", param: "agua" },
+  { label: "Registrar cafeína (+1 dose)", param: "cafe" },
+  { label: "Marcar creatina tomada", param: "creatina" },
+  { label: "Abrir pra registrar peso", param: "peso" },
+];
+function SiriShortcutsCard() {
+  const [copied, setCopied] = useState("");
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  async function copyLink(param) {
+    const url = `${origin}/?tab=hoje&acao=${param}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(param);
+      setTimeout(() => setCopied(""), 2000);
+    } catch (e) {}
+  }
+  return (
+    <div className="card">
+      <div className="card-head">Atalhos rápidos (Siri/Atalhos)</div>
+      <p className="muted export-hint">
+        Copia o link, cria um Atalho no app Atalhos do iPhone com a ação "Abrir URL" e amarra numa frase pra Siri —
+        tipo "Ei Siri, registra água".
+      </p>
+      {SIRI_SHORTCUTS.map((s) => (
+        <div className="meal-row" key={s.param}>
+          <div className="meal-name">{s.label}</div>
+          <button className="btn-secondary" onClick={() => copyLink(s.param)} style={{ padding: "6px 10px" }}>
+            {copied === s.param ? "Copiado!" : "Copiar link"}
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -4569,9 +5006,25 @@ function SettingsSheet({
           </div>
           <div className="card">
             <div className="card-head">Suplementos</div>
+            <p className="muted export-hint">Doses restantes é opcional — preenche só se quiser um aviso quando tiver acabando.</p>
             {(local.supplementList || []).map((name) => (
               <div className="meal-row" key={name}>
                 <div className="meal-name">{name}</div>
+                <input
+                  className="input mono"
+                  type="text"
+                  inputMode="numeric"
+                  placeholder="doses"
+                  style={{ width: 70, textAlign: "center" }}
+                  value={local.supplementStock?.[name] ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value.replace(/\D/g, "");
+                    setLocal((prev) => ({
+                      ...prev,
+                      supplementStock: { ...prev.supplementStock, [name]: v === "" ? undefined : parseInt(v, 10) },
+                    }));
+                  }}
+                />
                 <button
                   className="icon-btn"
                   onClick={() =>
@@ -4638,6 +5091,21 @@ function SettingsSheet({
               inputMode="decimal"
               value={local.startWeight}
               onChange={(e) => setLocal({ ...local, startWeight: parseFloat(sanitizeDecimal(e.target.value)) || 0 })}
+            />
+          </div>
+          <div className="card">
+            <div className="card-head">Altura (cm)</div>
+            <p className="muted export-hint">Usada só pra estimar o % de gordura (fórmula da Marinha) em Progresso.</p>
+            <input
+              className="input mono"
+              type="text"
+              inputMode="numeric"
+              placeholder="ex: 178"
+              value={local.heightCm ?? ""}
+              onChange={(e) => {
+                const v = e.target.value.replace(/\D/g, "");
+                setLocal({ ...local, heightCm: v === "" ? null : parseInt(v, 10) });
+              }}
             />
           </div>
           <div className="card">
@@ -4725,6 +5193,7 @@ function SettingsSheet({
             onRecoveryDone={onRecoveryDone}
           />
           <NotificationsCard session={session} local={local} setLocal={setLocal} />
+          <SiriShortcutsCard />
           <div className="card">
             <div className="card-head">Armazenamento</div>
             <div className="bar-track">
@@ -4753,7 +5222,7 @@ function SettingsSheet({
           <div className="card">
             <div className="card-head">Exportar dados</div>
             <p className="muted export-hint">
-              Baixa tudo que foi registrado (treino, dieta, peso) pra analisar depois num Excel/Sheets.
+              Baixa tudo que foi registrado (treino, dieta, peso, água, cafeína, sono, cardio, medidas) pra analisar depois num Excel/Sheets.
             </p>
             <button className="btn-secondary" onClick={() => exportCSV(logs)}>
               <Download size={15} /> Exportar resumo diário (CSV)
@@ -4902,7 +5371,27 @@ function downloadFile(filename, content, mime) {
 }
 
 function exportCSV(logs) {
-  const rows = [["data", "tipo_registrado_peso_kg", "exercicios_registrados", "proteina_g", "carboidrato_g", "gordura_g", "kcal"]];
+  const rows = [
+    [
+      "data",
+      "peso_kg",
+      "exercicios_registrados",
+      "rpe_sessao",
+      "proteina_g",
+      "carboidrato_g",
+      "gordura_g",
+      "kcal",
+      "cardio_kcal",
+      "agua_copos",
+      "cafeina_doses",
+      "sono_horas",
+      "cintura_cm",
+      "pescoco_cm",
+      "braco_cm",
+      "peito_cm",
+      "coxa_cm",
+    ],
+  ];
   Object.entries(logs)
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .forEach(([date, v]) => {
@@ -4912,14 +5401,26 @@ function exportCSV(logs) {
         { protein: 0, carb: 0, fat: 0 }
       );
       const exCount = v.exercises ? Object.keys(v.exercises).length : 0;
+      const cardioKcal = (v.cardio || []).reduce((s, e) => s + e.kcal, 0);
+      const m = v.measurements || {};
       rows.push([
         date,
         v.bodyweight ?? "",
         exCount,
+        v.sessionRPE ?? "",
         got.protein.toFixed(1),
         got.carb.toFixed(1),
         got.fat.toFixed(1),
         kcal(got.protein, got.carb, got.fat),
+        cardioKcal || "",
+        v.water ?? "",
+        v.caffeine ?? "",
+        v.sleepHours ?? "",
+        m.waist ?? "",
+        m.neck ?? "",
+        m.arm ?? "",
+        m.chest ?? "",
+        m.thigh ?? "",
       ]);
     });
   const csv = rows.map((r) => r.join(";")).join("\n");
