@@ -169,8 +169,8 @@ const DEFAULT_SETTINGS = {
   supersetLinks: {},
   supplementList: ["Creatina", "Whey protein", "Multivitamínico"],
   supplementStock: {},
-  notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true, medidas: true, creatina: true },
-  notificationTimes: { treino: 12, peso: 9, sync: 20, agua: 15, medidas: 20, creatina: 10 },
+  notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true, medidas: true, creatina: true, backup: true },
+  notificationTimes: { treino: 12, peso: 9, sync: 20, agua: 15, medidas: 20, creatina: 10, backup: 10 },
   notificationsPausedUntil: null,
   customTemplates: [],
   fontScale: 1,
@@ -178,6 +178,9 @@ const DEFAULT_SETTINGS = {
   caffeineDoseMg: 80,
   lastTDEE: null,
   injuries: [],
+  mesocycle: { startDate: null, weeks: 6 },
+  lastBackupExportAt: null,
+  backupReminderDays: 30,
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -268,6 +271,9 @@ const isTrainingDay = (dayType) => dayType !== "Descanso";
 // nomes/variações e equivalentes que já existem no PLAN, sem precisar marcar
 // exercício por exercício manualmente.
 const isUnilateralName = (name) => /unilateral|alternad|serrote/i.test(name || "");
+// RIR baixo (chegou perto da falha) pede mais descanso; RIR alto (sobrou
+// muito) não precisa de tanto — mapeamento simples, não uma fórmula.
+const RIR_REST_SUGGESTION = { "0": 150, "1": 120, "2": 90, "3+": 60 };
 const ALL_DAY_TYPES = ["Push", "Pull", "Legs", "Upper", "Lower", "Descanso"];
 // Paleta de reserva pros templates personalizados — escolhida por um hash
 // simples do nome, pra cada template ter uma cor estável e distinta sem o
@@ -512,6 +518,101 @@ function computePlateau(logs, goalWeight) {
     return { days: recent.length, range: range.toFixed(1), from: recent[0][0], to: lastDate };
   }
   return null;
+}
+
+// Platô de FORÇA — mesma ideia do platô de peso, mas olhando o índice de
+// força geral (média relativa dos 3 levantamentos-âncora): o peso pode até
+// estar variando bem, mas se a força trava por várias sessões seguidas é um
+// sinal diferente que vale destacar separado.
+function computeStrengthPlateau(logs) {
+  // Recalcula igual ao computeStrengthIndex, mas sem cortar o ano da data
+  // (aquele corta pra caber no eixo do gráfico) — aqui precisa da data cheia
+  // pra formatar certo com fmtDateLabel.
+  const baseline = {};
+  ANCHOR_LIFTS.forEach((name) => {
+    const first = firstInRange(logs, exerciseMaxWeightPred(name), "0000-01-01", null);
+    if (first) baseline[name] = first.value;
+  });
+  const data = Object.entries(logs)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([d, v]) => {
+      const pcts = ANCHOR_LIFTS.map((name) => {
+        const w = exerciseMaxWeightPred(name)(v);
+        return w != null && baseline[name] ? (w / baseline[name]) * 100 : null;
+      }).filter((p) => p != null);
+      if (!pcts.length) return null;
+      return { date: d, indice: Math.round(pcts.reduce((a, b) => a + b, 0) / pcts.length) };
+    })
+    .filter(Boolean);
+  if (data.length < 8) return null;
+  const recent = data.slice(-8);
+  const vals = recent.map((d) => d.indice);
+  const range = Math.max(...vals) - Math.min(...vals);
+  if (range <= 3) {
+    return { sessions: recent.length, range, from: recent[0].date, to: recent[recent.length - 1].date };
+  }
+  return null;
+}
+
+// Mesociclo planejado: semana 1..N contada a partir de uma data de início
+// configurada pelo usuário, reiniciando o ciclo a cada N semanas. A última
+// semana do ciclo é marcada como semana de deload — avisa ANTES de travar,
+// em vez de só detectar depois que já estagnou (como o DeloadCard faz).
+function computeMesocycleStatus(mesocycle) {
+  if (!mesocycle?.startDate || !mesocycle?.weeks) return null;
+  const start = new Date(mesocycle.startDate + "T00:00:00");
+  const now = new Date();
+  const daysElapsed = Math.floor((now - start) / 86400000);
+  if (daysElapsed < 0) return null;
+  const weekNum = Math.floor(daysElapsed / 7) + 1;
+  const cycleWeek = ((weekNum - 1) % mesocycle.weeks) + 1;
+  return {
+    weekNum,
+    cycleWeek,
+    totalWeeks: mesocycle.weeks,
+    isDeloadWeek: cycleWeek === mesocycle.weeks,
+    weeksUntilDeload: mesocycle.weeks - cycleWeek,
+  };
+}
+
+// Palavras-chave simples nas notas do dia, cruzadas com o volume de treino
+// daquele dia — não é análise de sentimento de verdade, só uma contagem de
+// palavra presente/ausente vs volume médio, pra ver se algum padrão salta
+// aos olhos (ex: dias com "cansado" renderam menos volume).
+const NOTE_KEYWORDS = [
+  "cansado", "cansada", "exausto", "exausta", "dolorido", "dolorida",
+  "animado", "animada", "disposto", "disposta", "estressado", "estressada",
+  "sem fome", "mal dormi", "dormi bem",
+];
+function computeNoteKeywordStats(logs) {
+  function dayVolume(v) {
+    let vol = 0;
+    Object.values(v?.exercises || {}).forEach((ex) => {
+      (ex?.sets || []).forEach((s) => {
+        vol += (parseFloat(s.weight) || 0) * (parseInt(s.reps, 10) || 0);
+      });
+    });
+    return vol;
+  }
+  const days = Object.values(logs).filter((v) => v?.exercises && dayVolume(v) > 0);
+  const results = [];
+  NOTE_KEYWORDS.forEach((kw) => {
+    const withKw = [];
+    const withoutKw = [];
+    days.forEach((v) => {
+      const vol = dayVolume(v);
+      const has = v.note && v.note.toLowerCase().includes(kw);
+      (has ? withKw : withoutKw).push(vol);
+    });
+    if (withKw.length < 2 || withoutKw.length < 2) return;
+    const avgWith = withKw.reduce((a, b) => a + b, 0) / withKw.length;
+    const avgWithout = withoutKw.reduce((a, b) => a + b, 0) / withoutKw.length;
+    const diffPct = ((avgWith - avgWithout) / avgWithout) * 100;
+    if (Math.abs(diffPct) < 10) return;
+    results.push({ keyword: kw, count: withKw.length, avgWith: Math.round(avgWith), avgWithout: Math.round(avgWithout), diffPct: Math.round(diffPct) });
+  });
+  results.sort((a, b) => Math.abs(b.diffPct) - Math.abs(a.diffPct));
+  return results.length ? results.slice(0, 3) : null;
 }
 
 // TDEE estimado a partir dos dados reais (não uma fórmula genérica) — cruza
@@ -2538,6 +2639,8 @@ function ExerciseCard({
   }
   const [sets, setSets] = useState(() => fillSets(logged));
   const [restLeft, setRestLeft] = useState(null); // segundos restantes do timer de descanso, ou null se parado
+  const [lastRest, setLastRest] = useState(null); // {planned, actual} do último descanso concluído/cancelado
+  const restStartRef = useRef(null);
 
   // Re-sincroniza só quando o dia ou o exercício mudam de verdade — não a cada
   // tecla. Ao salvar, as séries vazias são filtradas antes de ir pro storage
@@ -2546,8 +2649,25 @@ function ExerciseCard({
   useEffect(() => {
     setSets(fillSets(logged));
     setRestLeft(null);
+    setLastRest(null);
+    restStartRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDate, effectiveName, plan.sets, ready]);
+
+  function finishRestTracking() {
+    if (!restStartRef.current) return;
+    const actual = Math.round((Date.now() - restStartRef.current.start) / 1000);
+    setLastRest({ planned: restStartRef.current.planned, actual });
+    restStartRef.current = null;
+  }
+  function startRest(seconds) {
+    restStartRef.current = { start: Date.now(), planned: seconds };
+    setRestLeft(seconds);
+  }
+  function cancelRest() {
+    finishRestTracking();
+    setRestLeft(null);
+  }
 
   // Timer de descanso — decrementa 1x por segundo; ao chegar em zero, vibra e
   // bipa, mostra "0:00" por 1.5s e some sozinho.
@@ -2556,11 +2676,13 @@ function ExerciseCard({
     if (restLeft === 0) {
       playTimerBeep();
       if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      finishRestTracking();
       const t = setTimeout(() => setRestLeft(null), 1500);
       return () => clearTimeout(t);
     }
     const t = setTimeout(() => setRestLeft((s) => (s != null ? s - 1 : null)), 1000);
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [restLeft]);
 
   function commit(next) {
@@ -2640,6 +2762,11 @@ function ExerciseCard({
   // Assimetria: só faz sentido em exercício unilateral com o lado marcado nas
   // séries — compara a carga média de cada lado nas últimas 5 sessões (mais a
   // de hoje, se já tiver lado marcado) e avisa quando a diferença passa de 15%.
+  // Sugestão de descanso pelo RIR sentido (não pelo alvo do plano): chegou
+  // perto da falha (RIR baixo) pede mais recuperação; sobrou muito (RIR alto)
+  // não precisa descansar tanto. É calculado sobre o RIR marcado na última
+  // vez que o exercício foi avaliado, não por série individual.
+  const suggestedRestSec = rirFelt ? RIR_REST_SUGGESTION[rirFelt] : null;
   const unilateral = isUnilateralName(effectiveName);
   const asymmetryNote = useMemo(() => {
     if (!unilateral) return null;
@@ -2926,7 +3053,7 @@ function ExerciseCard({
               <Timer size={13} /> Descanso:
             </span>
             {[60, 90, 120].map((s) => (
-              <button key={s} className="rest-timer-btn" onClick={() => setRestLeft(s)}>
+              <button key={s} className="rest-timer-btn" onClick={() => startRest(s)}>
                 {s}s
               </button>
             ))}
@@ -2936,12 +3063,27 @@ function ExerciseCard({
             <span className={"rest-timer-active mono" + (restLeft === 0 ? " rest-timer-done" : "")}>
               <Timer size={13} /> {Math.floor(restLeft / 60)}:{String(restLeft % 60).padStart(2, "0")}
             </span>
-            <button className="rest-timer-cancel" onClick={() => setRestLeft(null)}>
+            <button className="rest-timer-cancel" onClick={cancelRest}>
               Cancelar
             </button>
           </>
         )}
       </div>
+      {lastRest && (
+        <div className="hint mono" style={{ marginTop: -6 }}>
+          Descanso real: {lastRest.actual}s (previsto {lastRest.planned}s)
+        </div>
+      )}
+      {restLeft == null && suggestedRestSec && (
+        <div className="hint mono" style={{ marginTop: -6 }}>
+          RIR sentido {rirFelt} → descanso sugerido: {suggestedRestSec}s
+          {suggestedRestSec !== 60 && suggestedRestSec !== 90 && suggestedRestSec !== 120 && (
+            <button type="button" className="link-btn" style={{ marginLeft: 6 }} onClick={() => startRest(suggestedRestSec)}>
+              Usar
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="rir-felt-row">
         <span className="muted mono rir-felt-label">RIR sentido:</span>
@@ -3429,6 +3571,9 @@ function ProgressoTab({ logs, settings, setSettings }) {
   }
   const stagnation = useMemo(() => computeStagnation(logs), [logs]);
   const overtraining = useMemo(() => computeOvertrainingRisk(logs), [logs]);
+  const strengthPlateau = useMemo(() => computeStrengthPlateau(logs), [logs]);
+  const mesocycleStatus = useMemo(() => computeMesocycleStatus(settings.mesocycle), [settings.mesocycle]);
+  const noteStats = useMemo(() => computeNoteKeywordStats(logs), [logs]);
   const bodyFat = useMemo(() => {
     const withNeck = Object.entries(logs)
       .filter(([, v]) => v?.measurements?.waist != null && v?.measurements?.neck != null)
@@ -3472,7 +3617,17 @@ function ProgressoTab({ logs, settings, setSettings }) {
 
       {overtraining && <OvertrainingCard risk={overtraining} />}
 
+      {strengthPlateau && <StrengthPlateauCard plateau={strengthPlateau} />}
+
+      {mesocycleStatus && <MesocycleCard mesocycle={settings.mesocycle} status={mesocycleStatus} />}
+
+      {settings.goalWeight != null && <WhatIfSimulator currentWeight={currentWeight} goalWeight={settings.goalWeight} />}
+
+      {noteStats && <NoteInsightsCard stats={noteStats} />}
+
       <InjuryTracker injuries={settings.injuries} setSettings={setSettings} />
+
+      <PhotoTimelapseCard logs={logs} />
 
       <div className="card">
         <div className="card-head">Peso corporal</div>
@@ -3964,6 +4119,146 @@ function PlateauCard({ plateau }) {
         {fmtDateLabel(plateau.to)}) — mesmo com a meta ainda longe. Vale reavaliar as calorias ou o NEAT (quanto você
         se movimenta fora do treino).
       </div>
+    </div>
+  );
+}
+
+function StrengthPlateauCard({ plateau }) {
+  return (
+    <div className="card">
+      <div className="card-head">Platô de força</div>
+      <div className="suggestion deload" style={{ marginTop: 0 }}>
+        <TrendingDown size={13} /> O índice de força geral variou só {plateau.range} pontos nas últimas{" "}
+        {plateau.sessions} sessões ({fmtDateLabel(plateau.from)} – {fmtDateLabel(plateau.to)}) — mesmo que o peso
+        corporal esteja mudando. Vale revisar volume, sono ou a variação dos exercícios.
+      </div>
+    </div>
+  );
+}
+
+function MesocycleCard({ mesocycle, status }) {
+  return (
+    <div className="card">
+      <div className="card-head">Mesociclo</div>
+      <div className="phase-stat-row">
+        <span className="muted">Semana</span>
+        <span className="mono" style={{ fontWeight: 600 }}>
+          {status.cycleWeek} de {status.totalWeeks}
+        </span>
+      </div>
+      {status.isDeloadWeek ? (
+        <p className="hint" style={{ marginBottom: 0, color: "var(--legs)" }}>
+          Essa é a semana de deload planejada — reduz volume/carga de propósito antes de começar o próximo ciclo.
+        </p>
+      ) : (
+        <p className="hint" style={{ marginBottom: 0 }}>
+          Faltam {status.weeksUntilDeload} semana{status.weeksUntilDeload === 1 ? "" : "s"} pro deload planejado.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function WhatIfSimulator({ currentWeight, goalWeight }) {
+  const [deficit, setDeficit] = useState("500");
+  const d = parseFloat(deficit) || 0;
+  const dailyChangeKg = -d / 7700; // déficit positivo = perde peso, negativo = superávit (ganha)
+  const neededChangeKg = goalWeight != null && currentWeight != null ? goalWeight - currentWeight : null;
+  let daysToGoal = null;
+  if (neededChangeKg != null && dailyChangeKg !== 0 && Math.sign(dailyChangeKg) === Math.sign(neededChangeKg)) {
+    daysToGoal = Math.ceil(neededChangeKg / dailyChangeKg);
+  }
+  const weeklyRateKg = dailyChangeKg * 7;
+  const projectedDate = (() => {
+    if (daysToGoal == null) return null;
+    const dt = new Date();
+    dt.setDate(dt.getDate() + daysToGoal);
+    return todayISO(dt);
+  })();
+
+  return (
+    <div className="card">
+      <div className="card-head">Simulador "e se"</div>
+      <p className="muted export-hint">Ajusta o déficit diário e vê a data projetada da meta mudar na hora.</p>
+      <div className="schedule-row">
+        <span>Déficit diário (kcal)</span>
+        <input
+          className="input mono settings-input"
+          type="text"
+          inputMode="numeric"
+          value={deficit}
+          onChange={(e) => setDeficit(e.target.value.replace(/[^0-9-]/g, ""))}
+        />
+      </div>
+      <div className="phase-stat-row">
+        <span className="muted">Ritmo projetado</span>
+        <span className="mono">
+          {weeklyRateKg >= 0 ? "+" : ""}
+          {weeklyRateKg.toFixed(2)}kg/semana
+        </span>
+      </div>
+      {daysToGoal != null ? (
+        <div className="phase-stat-row">
+          <span className="muted">Bateria a meta em</span>
+          <span className="mono">
+            {fmtDateLabel(projectedDate)} (~{daysToGoal}d)
+          </span>
+        </div>
+      ) : (
+        <p className="hint" style={{ marginBottom: 0 }}>
+          Com esse número você não caminha na direção da meta — ajusta o déficit.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PhotoTimelapseCard({ logs }) {
+  const photos = Object.entries(logs)
+    .filter(([, v]) => v.photo)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([d, v]) => ({ date: d, photo: v.photo }));
+  const [playing, setPlaying] = useState(false);
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (!playing || photos.length < 2) return;
+    const t = setInterval(() => setIdx((i) => (i + 1) % photos.length), 500);
+    return () => clearInterval(t);
+  }, [playing, photos.length]);
+  if (photos.length < 2) return null;
+  return (
+    <div className="card">
+      <div className="card-head">Time-lapse das fotos</div>
+      <img src={photos[idx].photo} alt="" className="progress-photo" />
+      <div className="hint mono" style={{ textAlign: "center" }}>
+        {fmtDateLabel(photos[idx].date)} · {idx + 1}/{photos.length}
+      </div>
+      <button className="btn-secondary" onClick={() => setPlaying((p) => !p)}>
+        {playing ? "Pausar" : "▶ Reproduzir"}
+      </button>
+    </div>
+  );
+}
+
+function NoteInsightsCard({ stats }) {
+  return (
+    <div className="card">
+      <div className="card-head">Padrões nas notas do dia</div>
+      <p className="muted export-hint">
+        Cruza palavras que você mesmo escreve nas notas com o volume de treino daquele dia — não é IA de sentimento,
+        só uma comparação simples.
+      </p>
+      {stats.map((s) => (
+        <div className="phase-stat-row" key={s.keyword}>
+          <span className="muted">
+            Dias com "{s.keyword}" ({s.count})
+          </span>
+          <span className="mono" style={{ color: s.diffPct < 0 ? "var(--legs)" : "var(--push)" }}>
+            {s.diffPct >= 0 ? "+" : ""}
+            {s.diffPct}% volume
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -4657,6 +4952,7 @@ const NOTIFICATION_KINDS = [
   { key: "sync", label: "Dias sem sincronizar", hasTime: true, defaultTime: 20 },
   { key: "medidas", label: "Dias sem medir o corpo", hasTime: true, defaultTime: 20 },
   { key: "creatina", label: "Lembrete de creatina", hasTime: true, defaultTime: 10 },
+  { key: "backup", label: "Lembrete de backup", hasTime: true, defaultTime: 10 },
   { key: "pr", label: "Novo recorde", hasTime: false },
   { key: "meta", label: "Meta de peso batida", hasTime: false },
 ];
@@ -5472,6 +5768,41 @@ function SettingsSheet({
             </div>
           </div>
           <div className="card">
+            <div className="card-head">Mesociclo</div>
+            <p className="muted export-hint">
+              Define a data de início e a duração — o app avisa a semana de deload antes de chegar, em vez de só
+              detectar estagnação depois que já travou.
+            </p>
+            <div className="phase-date-row">
+              <div>
+                <div className="hint phase-date-label">Início do ciclo</div>
+                <input
+                  className="input mono"
+                  type="date"
+                  value={local.mesocycle?.startDate || ""}
+                  onChange={(e) =>
+                    setLocal({ ...local, mesocycle: { ...local.mesocycle, startDate: e.target.value || null } })
+                  }
+                />
+              </div>
+              <div>
+                <div className="hint phase-date-label">Duração (semanas)</div>
+                <input
+                  className="input mono"
+                  type="text"
+                  inputMode="numeric"
+                  value={local.mesocycle?.weeks ?? 6}
+                  onChange={(e) =>
+                    setLocal({
+                      ...local,
+                      mesocycle: { ...local.mesocycle, weeks: parseInt(e.target.value.replace(/\D/g, ""), 10) || 6 },
+                    })
+                  }
+                />
+              </div>
+            </div>
+          </div>
+          <div className="card">
             <div className="card-head">Fases (corte, manutenção, bulk...)</div>
             {(local.phases || []).length === 0 && (
               <p className="muted export-hint">
@@ -5564,7 +5895,15 @@ function SettingsSheet({
             <button className="btn-secondary" onClick={() => exportCSV(logs)}>
               <Download size={15} /> Exportar resumo diário (CSV)
             </button>
-            <button className="btn-secondary" onClick={() => exportJSON(logs, settings)}>
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                exportJSON(logs, settings);
+                const patch = { lastBackupExportAt: todayISO() };
+                setSettings((prev) => ({ ...prev, ...patch }));
+                setLocal((prev) => ({ ...prev, ...patch }));
+              }}
+            >
               <Download size={15} /> Exportar backup completo (JSON)
             </button>
             <button
