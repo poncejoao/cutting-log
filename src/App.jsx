@@ -165,6 +165,7 @@ const DEFAULT_SETTINGS = {
   goalDate: null,
   macroTargets: { Treino: { protein: 157.5, carb: 257.5 }, Descanso: { protein: 158, carb: 195 } },
   waterTarget: 8,
+  waterAuto: true,
   supersetLinks: {},
   supplementList: ["Creatina", "Whey protein", "Multivitamínico"],
   notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true, medidas: true, creatina: true },
@@ -274,6 +275,21 @@ function getPlanExercises(dayType, settings) {
   if (PLAN[dayType]) return PLAN[dayType];
   const custom = (settings.customTemplates || []).find((t) => t.name === dayType);
   return custom ? custom.exercises : [];
+}
+// Peso corporal mais recente já registrado (qualquer data até hoje) — usado
+// pra calibrar a meta de água automática sem depender só do peso de hoje.
+function getLatestBodyweight(logs, fallback) {
+  const entries = Object.entries(logs || {})
+    .filter(([, v]) => v?.bodyweight != null)
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  return entries.length ? entries[entries.length - 1][1].bodyweight : fallback;
+}
+// Meta de água baseada no peso: ~35ml/kg de base, +500ml em dia de treino
+// (perda extra por suor). Arredonda pro copo de 250ml mais próximo.
+function computeWaterTargetCups(weightKg, training) {
+  if (!weightKg) return null;
+  const ml = weightKg * 35 + (training ? 500 : 0);
+  return Math.max(1, Math.round(ml / 250));
 }
 const kcal = (p, c, f) => Math.round(p * 4 + c * 4 + f * 9);
 const computeFromFood = (food, g) => ({
@@ -1235,6 +1251,7 @@ export default function App() {
             setTab={setTab}
             ready={ready}
             showUndo={showUndo}
+            logs={logs}
           />
         )}
         {tab === "treino" && (
@@ -1483,9 +1500,12 @@ function TabBtn({ icon: Icon, label, active, onClick }) {
 }
 
 // ---------------- Hoje ----------------
-function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready, showUndo }) {
+function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledType, dietCat, dayEntry, updateDay, setTab, ready, showUndo, logs }) {
   const [switching, setSwitching] = useState(false);
   const training = isTrainingDay(dayType);
+  const latestWeight = getLatestBodyweight(logs, settings.startWeight);
+  const autoWaterCups = settings.waterAuto ? computeWaterTargetCups(latestWeight, training) : null;
+  const waterTargetCups = autoWaterCups || settings.waterTarget;
   const target = settings.macroTargets[dietCat];
   const fatTarget = training ? settings.fatTraining : settings.fatRest;
   const targetKcal = kcal(target.protein, target.carb, fatTarget);
@@ -1626,7 +1646,12 @@ function HojeTab({ settings, selectedDate, setSelectedDate, dayType, scheduledTy
 
       <div className="card">
         <div className="card-head">Hidratação</div>
-        <WaterCounter dayEntry={dayEntry} updateDay={updateDay} target={settings.waterTarget} />
+        <WaterCounter dayEntry={dayEntry} updateDay={updateDay} target={waterTargetCups} />
+        {autoWaterCups != null && (
+          <div className="hint" style={{ marginTop: 6, marginBottom: 0 }}>
+            Meta automática pro seu peso ({latestWeight}kg{training ? ", dia de treino" : ""})
+          </div>
+        )}
       </div>
 
       <div className="card">
@@ -4524,13 +4549,23 @@ function SettingsSheet({
           </div>
           <div className="card">
             <div className="card-head">Meta de água (copos de 250ml/dia)</div>
-            <input
-              className="input mono"
-              type="text"
-              inputMode="numeric"
-              value={local.waterTarget}
-              onChange={(e) => setLocal({ ...local, waterTarget: parseInt(e.target.value, 10) || 0 })}
-            />
+            <button
+              type="button"
+              className={"notif-pref-toggle" + (local.waterAuto !== false ? " active" : "")}
+              onClick={() => setLocal({ ...local, waterAuto: local.waterAuto === false })}
+            >
+              <span className="notif-pref-dot" /> Ajustar automaticamente pelo peso (35ml/kg + 500ml em dia de treino)
+            </button>
+            {local.waterAuto === false && (
+              <input
+                className="input mono"
+                type="text"
+                inputMode="numeric"
+                style={{ marginTop: 8 }}
+                value={local.waterTarget}
+                onChange={(e) => setLocal({ ...local, waterTarget: parseInt(e.target.value, 10) || 0 })}
+              />
+            )}
           </div>
           <div className="card">
             <div className="card-head">Suplementos</div>
