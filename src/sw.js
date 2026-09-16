@@ -43,6 +43,8 @@ const NOTIFICATION_ACTIONS = {
   treino: [{ action: "open", title: "Registrar treino" }],
   peso: [{ action: "open", title: "Registrar peso" }],
   agua: [{ action: "open", title: "Registrar água" }],
+  medidas: [{ action: "open", title: "Registrar medidas" }],
+  creatina: [{ action: "open", title: "Registrar suplemento" }],
 };
 
 // Notificação push (lembrete de treino/peso/água/sincronização/recorde/meta)

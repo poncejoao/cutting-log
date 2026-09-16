@@ -118,6 +118,35 @@ const FOOD_DB = [
   { n: "Alface", p: 1.0, c: 2.0, f: 0.1 },
   { n: "Tomate", p: 0.9, c: 3.9, f: 0.2 },
   { n: "Cenoura crua", p: 0.9, c: 9.6, f: 0.2 },
+  // Itens com unitG/unitLabel são registrados por unidade (ex: 2 biscoitos)
+  // em vez de gramatura — a UI troca o input automaticamente pra esses.
+  { n: "Pipoca de sal (saco de rua)", p: 9.0, c: 63.0, f: 20.0, unitG: 30, unitLabel: "saco" },
+  { n: "Biscoito Mabel (maisena/água e sal)", p: 8.0, c: 75.0, f: 12.0, unitG: 7, unitLabel: "biscoito" },
+  { n: "Bolacha recheada (tipo Trakinas)", p: 6.0, c: 68.0, f: 20.0, unitG: 14, unitLabel: "unidade" },
+  { n: "Pão de queijo", p: 6.0, c: 34.0, f: 16.0, unitG: 30, unitLabel: "unidade" },
+  { n: "Coxinha de frango", p: 9.0, c: 20.0, f: 12.0, unitG: 80, unitLabel: "unidade" },
+  { n: "Pastel de feira (carne)", p: 8.0, c: 28.0, f: 14.0, unitG: 90, unitLabel: "unidade" },
+  { n: "Esfirra de carne", p: 10.0, c: 25.0, f: 10.0, unitG: 60, unitLabel: "unidade" },
+  { n: "Pizza mussarela (fatia)", p: 11.0, c: 28.0, f: 10.0, unitG: 100, unitLabel: "fatia" },
+  { n: "Hambúrguer fast food", p: 12.0, c: 22.0, f: 12.0, unitG: 220, unitLabel: "unidade" },
+  { n: "Hot dog completo", p: 9.0, c: 20.0, f: 10.0, unitG: 150, unitLabel: "unidade" },
+  { n: "Brigadeiro", p: 2.0, c: 55.0, f: 12.0, unitG: 15, unitLabel: "unidade" },
+  { n: "Refrigerante", p: 0, c: 10.5, f: 0, unitG: 350, unitLabel: "lata" },
+  { n: "Suco de caixinha", p: 0, c: 11.0, f: 0, unitG: 200, unitLabel: "caixinha" },
+  { n: "Cerveja", p: 0.3, c: 3.3, f: 0, unitG: 350, unitLabel: "lata" },
+  { n: "Barrinha de cereal", p: 7.0, c: 70.0, f: 8.0, unitG: 22, unitLabel: "unidade" },
+  { n: "Pão de forma (fatia)", p: 9.0, c: 49.0, f: 3.0, unitG: 25, unitLabel: "fatia" },
+  { n: "Ovo de codorna", p: 13.0, c: 0.4, f: 11.0, unitG: 9, unitLabel: "unidade" },
+  { n: "Sorvete (bola)", p: 3.5, c: 22.0, f: 11.0, unitG: 60, unitLabel: "bola" },
+  { n: "Batata frita (porção)", p: 3.4, c: 41.0, f: 15.0 },
+  { n: "Chocolate ao leite", p: 7.0, c: 57.0, f: 30.0 },
+  { n: "Granola", p: 10.0, c: 64.0, f: 14.0 },
+  { n: "Achocolatado em pó", p: 5.0, c: 80.0, f: 4.0 },
+  { n: "Leite condensado", p: 7.0, c: 55.0, f: 8.0 },
+  { n: "Farofa pronta", p: 2.0, c: 60.0, f: 15.0 },
+  { n: "Molho de tomate", p: 1.5, c: 8.0, f: 1.0 },
+  { n: "Salgadinho de pacote (tipo Doritos)", p: 6.0, c: 58.0, f: 28.0 },
+  { n: "Iogurte grego", p: 10.0, c: 4.0, f: 5.0 },
 ];
 
 const DEFAULT_SETTINGS = {
@@ -138,8 +167,8 @@ const DEFAULT_SETTINGS = {
   waterTarget: 8,
   supersetLinks: {},
   supplementList: ["Creatina", "Whey protein", "Multivitamínico"],
-  notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true },
-  notificationTimes: { treino: 12, peso: 9, sync: 20, agua: 15 },
+  notificationPrefs: { treino: true, peso: true, sync: true, meta: true, pr: true, agua: true, medidas: true, creatina: true },
+  notificationTimes: { treino: 12, peso: 9, sync: 20, agua: 15, medidas: 20, creatina: 10 },
   customTemplates: [],
   fontScale: 1,
 };
@@ -2509,12 +2538,20 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
   const [manualForm, setManualForm] = useState({ name: "", protein: "", carb: "", fat: "" });
 
   const matchedFood = FOOD_DB.find((f) => f.n === foodQuery);
-  const previewMacros = matchedFood && grams ? computeFromFood(matchedFood, parseFloat(grams) || 0) : null;
+  // Alimentos com unitG (ex: biscoito, pipoca em saco) são digitados em
+  // unidades — a gramatura real usada no cálculo vem de qty * unitG.
+  const isUnitFood = !!matchedFood?.unitG;
+  const effectiveGrams = matchedFood ? (isUnitFood ? (parseFloat(grams) || 0) * matchedFood.unitG : parseFloat(grams) || 0) : 0;
+  const previewMacros = matchedFood && grams ? computeFromFood(matchedFood, effectiveGrams) : null;
 
   function addFoodMeal() {
     if (!matchedFood || !grams || parseFloat(grams) <= 0) return;
-    const m = computeFromFood(matchedFood, parseFloat(grams));
-    updateDay({ meals: [...meals, { name: `${matchedFood.n} (${grams}g)`, ...m }] });
+    const m = computeFromFood(matchedFood, effectiveGrams);
+    const qty = parseFloat(grams);
+    const label = isUnitFood
+      ? `${matchedFood.n} (${grams} ${matchedFood.unitLabel}${qty === 1 ? "" : "s"})`
+      : `${matchedFood.n} (${grams}g)`;
+    updateDay({ meals: [...meals, { name: label, ...m }] });
     setFoodQuery("");
     setGrams("");
   }
@@ -2670,7 +2707,7 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
               className="input mono"
               type="text"
               inputMode="decimal"
-              placeholder="Quantidade (g)"
+              placeholder={isUnitFood ? `Quantidade (${matchedFood.unitLabel}s)` : "Quantidade (g)"}
               value={grams}
               onChange={(e) => setGrams(sanitizeDecimal(e.target.value))}
               style={{ marginTop: 8 }}
@@ -3920,6 +3957,8 @@ const NOTIFICATION_KINDS = [
   { key: "peso", label: "Lembrete de peso", hasTime: true, defaultTime: 9 },
   { key: "agua", label: "Lembrete de água", hasTime: true, defaultTime: 15 },
   { key: "sync", label: "Dias sem sincronizar", hasTime: true, defaultTime: 20 },
+  { key: "medidas", label: "Dias sem medir o corpo", hasTime: true, defaultTime: 20 },
+  { key: "creatina", label: "Lembrete de creatina", hasTime: true, defaultTime: 10 },
   { key: "pr", label: "Novo recorde", hasTime: false },
   { key: "meta", label: "Meta de peso batida", hasTime: false },
 ];
@@ -3978,8 +4017,8 @@ function NotificationsCard({ session, local, setLocal }) {
     <div className="card">
       <div className="card-head">Notificações</div>
       <p className="muted export-hint">
-        Lembrete de treino (se passar do meio-dia sem registrar), lembrete de peso, aviso de dias sem sincronizar e um
-        alô quando bater a meta — chegam mesmo com o app fechado.
+        Lembrete de treino, peso, água, medidas corporais, creatina, dias sem sincronizar e um alô quando bater
+        recorde ou meta — chegam mesmo com o app fechado.
       </p>
       {permission === "denied" && (
         <p className="sync-age-warn">
