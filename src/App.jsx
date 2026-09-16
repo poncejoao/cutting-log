@@ -181,6 +181,8 @@ const DEFAULT_SETTINGS = {
   mesocycle: { startDate: null, weeks: 6 },
   lastBackupExportAt: null,
   backupReminderDays: 30,
+  plateIncrement: 2.5,
+  substitutionHistory: [],
 };
 
 // Exercícios-âncora usados na comparação de fases — um levantamento composto
@@ -566,13 +568,112 @@ function computeMesocycleStatus(mesocycle) {
   if (daysElapsed < 0) return null;
   const weekNum = Math.floor(daysElapsed / 7) + 1;
   const cycleWeek = ((weekNum - 1) % mesocycle.weeks) + 1;
+  const cycleIndex = Math.floor((weekNum - 1) / mesocycle.weeks);
+  const cycleStart = new Date(start);
+  cycleStart.setDate(cycleStart.getDate() + cycleIndex * mesocycle.weeks * 7);
   return {
     weekNum,
     cycleWeek,
     totalWeeks: mesocycle.weeks,
     isDeloadWeek: cycleWeek === mesocycle.weeks,
     weeksUntilDeload: mesocycle.weeks - cycleWeek,
+    cycleStartDate: todayISO(cycleStart),
   };
+}
+
+// Recordes separados por faixa de reps — 1RM não conta a história toda pra
+// quem varia a faixa de treino entre mesociclos (força pura vs hipertrofia).
+// É a carga REAL levantada em cada faixa, não uma estimativa.
+const REP_BUCKETS = [
+  { key: "1RM", label: "~1RM", min: 1, max: 2 },
+  { key: "5RM", label: "~5RM", min: 4, max: 6 },
+  { key: "10RM", label: "~10RM", min: 8, max: 12 },
+];
+function computePRByRepRange(logs) {
+  const byName = {};
+  Object.entries(logs)
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .forEach(([d, v]) => {
+      if (!v?.exercises) return;
+      Object.entries(v.exercises).forEach(([name, ex]) => {
+        if (!ex?.sets?.length) return;
+        (byName[name] || (byName[name] = [])).push(...ex.sets);
+      });
+    });
+  const result = {};
+  Object.entries(byName).forEach(([name, sets]) => {
+    const best = {};
+    sets.forEach((s) => {
+      const w = parseFloat(s.weight) || 0;
+      const r = parseInt(s.reps, 10) || 0;
+      if (!w || !r) return;
+      const bucket = REP_BUCKETS.find((b) => r >= b.min && r <= b.max);
+      if (!bucket) return;
+      if (!best[bucket.key] || w > best[bucket.key]) best[bucket.key] = w;
+    });
+    if (Object.keys(best).length) result[name] = best;
+  });
+  return result;
+}
+
+// Junta as trocas de exercício registradas (settings.substitutionHistory) por
+// exercício original, pra ver ao longo do tempo o que costuma virar "fuga".
+function summarizeSubstitutionHistory(history) {
+  if (!history?.length) return null;
+  const byFrom = {};
+  history.forEach((h) => {
+    if (!byFrom[h.from]) byFrom[h.from] = { total: 0, to: {} };
+    byFrom[h.from].total++;
+    byFrom[h.from].to[h.to] = (byFrom[h.from].to[h.to] || 0) + 1;
+  });
+  return Object.entries(byFrom)
+    .map(([from, data]) => ({
+      from,
+      total: data.total,
+      breakdown: Object.entries(data.to)
+        .sort((a, b) => b[1] - a[1])
+        .map(([to, n]) => `${n}x ${to}`),
+    }))
+    .sort((a, b) => b.total - a.total);
+}
+
+// Tendência de RIR sentido vs alvo do plano, por semana — sinaliza se o
+// usuário costuma sentir mais ou menos RIR do que o plano pede (pode indicar
+// que a faixa de reps/carga alvo está calibrada errado pra ele).
+function computeRirTrend(logs) {
+  const targetByName = {};
+  ["Push", "Pull", "Legs"].forEach((cat) => {
+    (PLAN[cat] || []).forEach((ex) => {
+      const nums = (ex.rir || "").split("-").map((n) => parseFloat(n)).filter((n) => !isNaN(n));
+      if (!nums.length) return;
+      const mid = nums.reduce((a, b) => a + b, 0) / nums.length;
+      targetByName[ex.n] = mid;
+      (ex.equivalents || []).forEach((eq) => (targetByName[eq] = mid));
+    });
+  });
+  const byWeek = {};
+  Object.entries(logs).forEach(([d, v]) => {
+    Object.entries(v?.exercises || {}).forEach(([name, ex]) => {
+      if (ex?.rirFelt == null) return;
+      const target = targetByName[name];
+      if (target == null) return;
+      const felt = ex.rirFelt === "3+" ? 3.5 : parseFloat(ex.rirFelt);
+      if (isNaN(felt)) return;
+      const dt = new Date(d + "T12:00:00");
+      const weekStart = new Date(dt);
+      weekStart.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));
+      const wk = todayISO(weekStart);
+      (byWeek[wk] = byWeek[wk] || []).push(felt - target);
+    });
+  });
+  const weeks = Object.keys(byWeek).sort();
+  if (weeks.length < 3) return null;
+  const data = weeks.map((wk) => ({
+    date: wk.slice(5),
+    delta: +(byWeek[wk].reduce((a, b) => a + b, 0) / byWeek[wk].length).toFixed(1),
+  }));
+  const overall = +(data.reduce((a, b) => a + b.delta, 0) / data.length).toFixed(1);
+  return { data, overall };
 }
 
 // Palavras-chave simples nas notas do dia, cruzadas com o volume de treino
@@ -1048,9 +1149,9 @@ function compressImageFile(file, maxDim = 900, quality = 0.6) {
 }
 
 // Rampa de aquecimento a partir da carga de trabalho de hoje — 3 passos a
-// 40/60/80%, arredondados pro incremento de anilha mais próximo (2,5kg), com
-// reps decrescendo conforme o peso sobe.
-function computeWarmup(workingWeight) {
+// 40/60/80%, arredondados pro incremento de anilha configurado (padrão
+// 2,5kg), com reps decrescendo conforme o peso sobe.
+function computeWarmup(workingWeight, increment = 2.5) {
   if (!workingWeight || workingWeight <= 0) return [];
   return [
     { pct: 40, reps: 8 },
@@ -1058,7 +1159,7 @@ function computeWarmup(workingWeight) {
     { pct: 80, reps: 3 },
   ].map((step) => ({
     ...step,
-    weight: Math.max(2.5, Math.round((workingWeight * step.pct) / 100 / 2.5) * 2.5),
+    weight: Math.max(increment, Math.round((workingWeight * step.pct) / 100 / increment) * increment),
   }));
 }
 
@@ -2490,11 +2591,18 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
     }));
   }
 
-  function setSubstitution(id, name) {
-    setSettings((prev) => ({
-      ...prev,
-      exerciseSubstitutions: { ...prev.exerciseSubstitutions, [id]: name },
-    }));
+  function setSubstitution(id, name, fromName) {
+    setSettings((prev) => {
+      const entry =
+        fromName && fromName !== name
+          ? [{ id: Date.now().toString(36), exerciseId: id, from: fromName, to: name, date: todayISO() }]
+          : [];
+      return {
+        ...prev,
+        exerciseSubstitutions: { ...prev.exerciseSubstitutions, [id]: name },
+        substitutionHistory: [...(prev.substitutionHistory || []), ...entry].slice(-100),
+      };
+    });
   }
 
   function moveExercise(id, dir) {
@@ -2553,6 +2661,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             key={ex.id}
             plan={ex}
             effectiveName={key}
+            plateIncrement={settings.plateIncrement || 2.5}
             selectedDate={selectedDate}
             ready={ready}
             logged={entry.sets}
@@ -2564,7 +2673,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
             grip={settings.exerciseGrips[ex.id] || ex.grips?.[0]}
             onGripChange={(g) => setGrip(ex.id, g)}
             substitution={settings.exerciseSubstitutions[ex.id] || ex.n}
-            onSubstitutionChange={(v) => setSubstitution(ex.id, v)}
+            onSubstitutionChange={(v) => setSubstitution(ex.id, v, key)}
             onMoveUp={i > 0 ? () => moveExercise(ex.id, -1) : null}
             onMoveDown={i < orderedExercises.length - 1 ? () => moveExercise(ex.id, 1) : null}
             rirFelt={entry.rirFelt || null}
@@ -2601,6 +2710,7 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
 function ExerciseCard({
   plan,
   effectiveName,
+  plateIncrement = 2.5,
   selectedDate,
   ready,
   logged,
@@ -2833,8 +2943,8 @@ function ExerciseCard({
       // próximo) e voltar pro início da faixa de reps.
       const lastTop = topSet(last);
       const bottomRep = parseInt(plan.reps.split("-")[0], 10) || top;
-      let nextWeight = lastTop && lastTop.w > 0 ? Math.ceil((lastTop.w * 1.025) / 2.5) * 2.5 : null;
-      if (nextWeight != null && nextWeight <= lastTop.w) nextWeight = lastTop.w + 2.5;
+      let nextWeight = lastTop && lastTop.w > 0 ? Math.ceil((lastTop.w * 1.025) / plateIncrement) * plateIncrement : null;
+      if (nextWeight != null && nextWeight <= lastTop.w) nextWeight = lastTop.w + plateIncrement;
       suggestion = nextWeight
         ? { text: `Hoje tenta ${nextWeight}kg × ${bottomRep} — bateu ${top} reps em todas as séries 2x seguidas`, tone: "up" }
         : { text: `Suba a carga (+2,5–5%) — bateu ${top} reps em todas as séries 2x seguidas`, tone: "up" };
@@ -2856,7 +2966,7 @@ function ExerciseCard({
   // Rampa de aquecimento baseada na carga de trabalho de hoje (ou, se ainda
   // não preencheu nada, na última sessão registrada).
   const workingWeight = currentTopSet?.w || topSet(last)?.w || null;
-  const warmupSteps = computeWarmup(workingWeight);
+  const warmupSteps = computeWarmup(workingWeight, plateIncrement);
 
   return (
     <div className={"card exercise-card" + (isLinkedFromPrev ? " ex-linked-prev" : "")}>
@@ -3137,6 +3247,11 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
     fat: Math.max(0, fatTarget - got.fat),
   };
   const cardioKcal = (dayEntry.cardio || []).reduce((s, e) => s + e.kcal, 0);
+  // Alerta de concentração: proteína toda numa refeição só distribui pior a
+  // síntese proteica ao longo do dia do que espalhada — só avisa com >=2
+  // refeições e uma meta que já valha a pena avaliar (>=20g).
+  const maxMealProtein = meals.length >= 2 ? Math.max(...meals.map((m) => m.protein)) : 0;
+  const proteinConcentrated = target.protein >= 20 && maxMealProtein / target.protein > 0.6;
   const weeklyBank = useMemo(
     () => computeWeeklyCalorieBank(logs, settings, selectedDate),
     [logs, settings, selectedDate]
@@ -3252,6 +3367,12 @@ function DietaTab({ dietCat, settings, setSettings, dayEntry, updateDay, logs, s
         {cardioKcal > 0 && (
           <div className="hint mono" style={{ marginBottom: 0 }}>
             <Activity size={11} style={{ verticalAlign: "-1px" }} /> Líquido (comida − cardio): {kcal(got.protein, got.carb, got.fat) - cardioKcal} kcal
+          </div>
+        )}
+        {proteinConcentrated && (
+          <div className="hint" style={{ marginBottom: 0 }}>
+            Mais de 60% da proteína do dia veio de uma refeição só — distribuir melhor ao longo do dia costuma
+            aproveitar mais a síntese proteica.
           </div>
         )}
         {meals.length === 0 && yesterdayMeals.length > 0 && (
@@ -3573,7 +3694,13 @@ function ProgressoTab({ logs, settings, setSettings }) {
   const overtraining = useMemo(() => computeOvertrainingRisk(logs), [logs]);
   const strengthPlateau = useMemo(() => computeStrengthPlateau(logs), [logs]);
   const mesocycleStatus = useMemo(() => computeMesocycleStatus(settings.mesocycle), [settings.mesocycle]);
+  const mesocycleClosing = useMemo(() => {
+    if (!mesocycleStatus?.isDeloadWeek) return null;
+    return computeDateCompare(logs, mesocycleStatus.cycleStartDate, todayISO());
+  }, [logs, mesocycleStatus]);
   const noteStats = useMemo(() => computeNoteKeywordStats(logs), [logs]);
+  const prByRepRange = useMemo(() => computePRByRepRange(logs), [logs]);
+  const rirTrend = useMemo(() => computeRirTrend(logs), [logs]);
   const bodyFat = useMemo(() => {
     const withNeck = Object.entries(logs)
       .filter(([, v]) => v?.measurements?.waist != null && v?.measurements?.neck != null)
@@ -3621,9 +3748,24 @@ function ProgressoTab({ logs, settings, setSettings }) {
 
       {mesocycleStatus && <MesocycleCard mesocycle={settings.mesocycle} status={mesocycleStatus} />}
 
+      {mesocycleClosing && (
+        <ThreeMonthsAgoCard
+          fromDate={mesocycleStatus.cycleStartDate}
+          result={mesocycleClosing}
+          title="Fechamento do mesociclo"
+          subtitle={`Do início do ciclo (${fmtDateLabel(mesocycleStatus.cycleStartDate)}) até hoje — semana de deload, hora de olhar o antes × depois.`}
+        />
+      )}
+
       {settings.goalWeight != null && <WhatIfSimulator currentWeight={currentWeight} goalWeight={settings.goalWeight} />}
 
+      {rirTrend && <RirTrendCard trend={rirTrend} />}
+
       {noteStats && <NoteInsightsCard stats={noteStats} />}
+
+      <RepRangePRCard prByRange={prByRepRange} />
+
+      <SubstitutionHistoryCard history={settings.substitutionHistory} />
 
       <InjuryTracker injuries={settings.injuries} setSettings={setSettings} />
 
@@ -3963,6 +4105,77 @@ function PRHistoryCard({ prHistory }) {
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function RepRangePRCard({ prByRange }) {
+  const entries = Object.entries(prByRange);
+  if (!entries.length) return null;
+  return (
+    <div className="card">
+      <div className="card-head">Recordes por faixa de reps</div>
+      <p className="muted export-hint">
+        Carga real já levantada em cada faixa (não é 1RM estimado) — útil pra quem varia entre força e hipertrofia.
+      </p>
+      {entries.map(([name, buckets]) => (
+        <div className="phase-stat-row" key={name}>
+          <span className="muted">{name}</span>
+          <span className="mono">
+            {REP_BUCKETS.map((b) => (buckets[b.key] != null ? `${b.label}: ${buckets[b.key]}kg` : null))
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SubstitutionHistoryCard({ history }) {
+  const summary = summarizeSubstitutionHistory(history);
+  if (!summary) return null;
+  return (
+    <div className="card">
+      <div className="card-head">Histórico de trocas de exercício</div>
+      {summary.map((s) => (
+        <div className="phase-stat-row" key={s.from}>
+          <span className="muted">
+            {s.from} ({s.total}x)
+          </span>
+          <span className="mono" style={{ fontSize: 11.5 }}>
+            {s.breakdown.join(", ")}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RirTrendCard({ trend }) {
+  const chartRef = useRef(null);
+  return (
+    <div className="card">
+      <div className="card-head">RIR sentido vs plano</div>
+      <div className="phase-stat-row">
+        <span className="muted">Média geral</span>
+        <span className="mono" style={{ fontWeight: 600 }}>
+          {trend.overall > 0 ? "+" : ""}
+          {trend.overall}
+        </span>
+      </div>
+      <div ref={chartRef}>
+        <Suspense fallback={<ChartFallback height={140} />}>
+          <MiniLineChart data={trend.data} dataKey="delta" height={140} valueSuffix="" />
+        </Suspense>
+      </div>
+      <p className="hint" style={{ marginBottom: 0 }}>
+        {trend.overall > 0.3
+          ? "Você costuma sentir MAIS RIR do que o plano pede — talvez dê pra subir a carga um pouco mais rápido."
+          : trend.overall < -0.3
+          ? "Você costuma sentir MENOS RIR do que o plano pede (chega mais perto da falha) — talvez a carga esteja alta demais pro alvo."
+          : "Em média, o RIR sentido bate com o alvo do plano."}
+      </p>
     </div>
   );
 }
@@ -4551,7 +4764,12 @@ function DateCompareCard({ logs }) {
   );
 }
 
-function ThreeMonthsAgoCard({ fromDate, result }) {
+function ThreeMonthsAgoCard({
+  fromDate,
+  result,
+  title = "Você, 3 meses atrás",
+  subtitle = `Comparação automática com ${fmtDateLabel(fromDate)} — sem precisar escolher a data.`,
+}) {
   const weightDelta = result.weightA != null && result.weightB != null ? result.weightB - result.weightA : null;
   const hasAnything = weightDelta != null || result.lifts.some((l) => l.a != null && l.b != null);
   if (!hasAnything) return null;
@@ -4559,9 +4777,9 @@ function ThreeMonthsAgoCard({ fromDate, result }) {
     <div className="card">
       <div className="card-head">
         <History size={13} style={{ verticalAlign: "-2px", marginRight: 5 }} />
-        Você, 3 meses atrás
+        {title}
       </div>
-      <p className="muted export-hint">Comparação automática com {fmtDateLabel(fromDate)} — sem precisar escolher a data.</p>
+      <p className="muted export-hint">{subtitle}</p>
       <div className="phase-card">
         <div className="phase-stat-row">
           <span className="muted">Peso corporal</span>
@@ -5724,6 +5942,20 @@ function SettingsSheet({
               inputMode="decimal"
               value={local.startWeight}
               onChange={(e) => setLocal({ ...local, startWeight: parseFloat(sanitizeDecimal(e.target.value)) || 0 })}
+            />
+          </div>
+          <div className="card">
+            <div className="card-head">Incremento de anilha (kg)</div>
+            <p className="muted export-hint">
+              Usado nas sugestões de progressão e na rampa de aquecimento — ajusta pro menor salto de peso que você
+              realmente tem disponível.
+            </p>
+            <input
+              className="input mono"
+              type="text"
+              inputMode="decimal"
+              value={local.plateIncrement ?? 2.5}
+              onChange={(e) => setLocal({ ...local, plateIncrement: parseFloat(sanitizeDecimal(e.target.value)) || 2.5 })}
             />
           </div>
           <div className="card">
