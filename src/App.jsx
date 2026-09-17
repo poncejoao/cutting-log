@@ -1485,6 +1485,10 @@ export default function App() {
     return raw ? Number(raw) : null;
   });
   const pulledFromCloud = useRef(false);
+  // Só true depois que a mesclagem com a nuvem (abaixo) já rodou pra essa
+  // sessão — evita que um local incompleto (ex: reinstalação do app) seja
+  // empurrado e sobrescreva um backup bom antes de dar tempo de mesclar.
+  const cloudSyncedOnce = useRef(false);
 
   // Toast de "desfazer" — usado por ações de apagar que são fáceis de tocar
   // sem querer (remover refeição, remover foto). Some sozinho em 5s.
@@ -1547,8 +1551,14 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Aparelho novo/reinstalado: se logar e o localStorage estiver vazio, puxa
-  // o que já tinha na nuvem em vez de sobrescrever com nada.
+  // Ao logar, MESCLA o que já tinha na nuvem com o que tem local — nunca
+  // sobrescreve. Cada dia (chave de data) que só existe de um lado é
+  // mantido; se o mesmo dia existir dos dois lados, o local vence (é o mais
+  // recente/vivo). Antes isso só puxava da nuvem se o local estivesse
+  // 100% vazio, o que é frágil: um local parcialmente zerado (ex: app
+  // reinstalado) passava no teste de "não vazio" e um dia acabou sendo
+  // empurrado por cima de um backup bom, apagando dias que só existiam na
+  // nuvem. Mesclar por dia é seguro nos dois cenários.
   useEffect(() => {
     if (!ready || !session || pulledFromCloud.current) return;
     pulledFromCloud.current = true;
@@ -1560,12 +1570,14 @@ export default function App() {
         .maybeSingle();
       if (error) {
         console.error("cloud pull failed", error);
+        cloudSyncedOnce.current = true;
         return;
       }
-      if (data && Object.keys(logs).length === 0) {
-        if (data.logs) setLogs(data.logs);
-        if (data.settings) setSettings((prev) => ({ ...prev, ...data.settings }));
+      if (data) {
+        if (data.logs) setLogs((prev) => ({ ...data.logs, ...prev }));
+        if (data.settings) setSettings((prev) => ({ ...data.settings, ...prev }));
       }
+      cloudSyncedOnce.current = true;
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, session]);
@@ -1573,8 +1585,11 @@ export default function App() {
   // Empurra pra nuvem sempre que logs/settings mudam, com um pequeno atraso
   // (não precisa da urgência do flush local — o localStorage já é a fonte
   // confiável; a nuvem é só o espelho/seguro contra perda do aparelho).
+  // Só roda depois que a mesclagem acima já terminou (cloudSyncedOnce) —
+  // senão o primeiro push do app, com o local ainda não mesclado, pode
+  // disparar antes da mesclagem chegar e sobrescrever a nuvem.
   useEffect(() => {
-    if (!ready || !session) return;
+    if (!ready || !session || !cloudSyncedOnce.current) return;
     const timer = setTimeout(async () => {
       setCloudStatus("syncing");
       const { error } = await supabase
@@ -5139,7 +5154,16 @@ function ExerciseProgressCard({ logs }) {
 }
 
 // ---------------- Settings ----------------
-function CloudBackupCard({ session, cloudStatus, lastSyncAt, recoveryMode, onRecoveryDone }) {
+function CloudBackupCard({
+  session,
+  cloudStatus,
+  lastSyncAt,
+  recoveryMode,
+  onRecoveryDone,
+  onRestoreFromCloud,
+  restoreBusy,
+  restoreMsg,
+}) {
   const [mode, setMode] = useState("signup"); // signup | login
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -5259,6 +5283,19 @@ function CloudBackupCard({ session, cloudStatus, lastSyncAt, recoveryMode, onRec
               ? "Última sincronização: hoje"
               : `Última sincronização: há ${daysSinceSync} dia${daysSinceSync > 1 ? "s" : ""}`}
             {syncStale && " — confere se o celular teve internet ultimamente"}
+          </p>
+        )}
+        <button
+          className="btn-secondary"
+          disabled={restoreBusy}
+          onClick={onRestoreFromCloud}
+          style={{ marginBottom: 8 }}
+        >
+          <Cloud size={15} /> {restoreBusy ? "Buscando…" : "Restaurar backup da nuvem"}
+        </button>
+        {restoreMsg && (
+          <p className="muted export-hint" style={{ marginBottom: 8 }}>
+            {restoreMsg}
           </p>
         )}
         <button className="btn-secondary" onClick={handleLogout}>
@@ -5830,6 +5867,40 @@ function SettingsSheet({
       setImportMsg("Não consegui ler esse arquivo — confere se é um JSON exportado daqui mesmo.");
     }
   }
+  const [restoreMsg, setRestoreMsg] = useState("");
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  async function handleRestoreFromCloud() {
+    if (!session) return;
+    setRestoreBusy(true);
+    setRestoreMsg("");
+    try {
+      const { data, error } = await supabase
+        .from("backups")
+        .select("logs,settings")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (error) {
+        setRestoreMsg("Erro ao buscar o backup: " + error.message);
+        return;
+      }
+      if (!data || !data.logs || Object.keys(data.logs).length === 0) {
+        setRestoreMsg("Não tem nenhum backup salvo nessa conta ainda.");
+        return;
+      }
+      // Mescla por dia (nunca some um dia que só existe de um lado); em dia
+      // que existe dos dois lados, o que já tá aberto na tela agora vence —
+      // assim não se perde uma edição feita nos últimos segundos.
+      setLogs((prev) => ({ ...data.logs, ...prev }));
+      if (data.settings) {
+        setSettings((prev) => ({ ...data.settings, ...prev }));
+      }
+      setRestoreMsg(`Backup da nuvem mesclado — ${Object.keys(data.logs).length} dia(s) na nuvem.`);
+    } catch (e) {
+      setRestoreMsg("Erro inesperado: " + (e?.message || String(e)));
+    } finally {
+      setRestoreBusy(false);
+    }
+  }
   const [pdfBusy, setPdfBusy] = useState(false);
 
   const storage = useMemo(() => {
@@ -6253,6 +6324,9 @@ function SettingsSheet({
             lastSyncAt={lastSyncAt}
             recoveryMode={recoveryMode}
             onRecoveryDone={onRecoveryDone}
+            onRestoreFromCloud={handleRestoreFromCloud}
+            restoreBusy={restoreBusy}
+            restoreMsg={restoreMsg}
           />
           <NotificationsCard session={session} local={local} setLocal={setLocal} />
           <SiriShortcutsCard />
