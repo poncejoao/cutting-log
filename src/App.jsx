@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff, Mic, Coffee, Activity, Percent, PauseCircle, Gauge } from "lucide-react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff, Mic, Coffee, Activity, Percent, PauseCircle, Gauge, PlayCircle, ExternalLink } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 import { isPushSupported, getPushPermission, isPushEnabled, enablePush, disablePush } from "./push.js";
 
@@ -238,6 +238,109 @@ const EXERCISE_TIPS = {
   "panturrilha-sentada": "Foco no gastrocnêmio muda pro sóleo com o joelho flexionado — controla a descida.",
   "abdomen": "Movimento vem do abdômen, não do quadril — evita balançar as pernas pra ajudar.",
 };
+
+// Fotos de referência de execução (início/fim do movimento, que o app
+// alterna pra simular vídeo) — vindas do free-exercise-db
+// (github.com/yuhonas/free-exercise-db), domínio público (Unlicense),
+// hospedadas no GitHub. Cada valor é o id da pasta de imagens no dataset;
+// mapeado a dedo, conferindo cada foto, pra garantir que bate com o nome em
+// português. Exercício sem entrada aqui ainda funciona — só cai direto pro
+// link de busca no YouTube.
+const EXERCISE_DEMO_BASE = "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/";
+const EXERCISE_DEMO_MAP = {
+  "Abdômen": "Crunches",
+  "Agachamento búlgaro": "Split_Squat_with_Dumbbells",
+  "Agachamento livre": "Barbell_Squat",
+  "Agachamento sissy": "Weighted_Sissy_Squat",
+  "Barra fixa (pull-up)": "Pullups",
+  "Cadeira extensora": "Leg_Extensions",
+  "Crucifixo inclinado halteres": "Incline_Dumbbell_Flyes",
+  "Crucifixo invertido halteres": "Seated_Bent-Over_Rear_Delt_Raise",
+  "Crucifixo invertido máquina": "Reverse_Machine_Flyes",
+  "Crucifixo reto halteres": "Dumbbell_Flyes",
+  "Desenvolvimento Arnold": "Arnold_Dumbbell_Press",
+  "Desenvolvimento militar": "Standing_Military_Press",
+  "Desenvolvimento máquina": "Leverage_Shoulder_Press",
+  "Elevação de pernas": "Hanging_Leg_Raise",
+  "Elevação lateral": "Side_Lateral_Raise",
+  "Elevação lateral polia unilateral": "Cable_Seated_Lateral_Raise",
+  "Extensão lombar solo (superman)": "Superman",
+  "Face pull": "Face_Pull",
+  "Flexora sentado": "Seated_Leg_Curl",
+  "Good morning leve": "Good_Morning",
+  "Hack machine": "Hack_Squat",
+  "Leg press 45°": "Leg_Press",
+  "Lombar máquina": "Hyperextensions_Back_Extensions",
+  "Mergulho no banco (bench dip)": "Bench_Dips",
+  "Mesa flexora": "Lying_Leg_Curls",
+  "Panturrilha Smith": "Smith_Machine_Calf_Raise",
+  "Panturrilha burrinho (donkey calf raise)": "Donkey_Calf_Raises",
+  "Panturrilha em pé": "Standing_Calf_Raises",
+  "Panturrilha no leg press": "Calf_Press_On_The_Leg_Press_Machine",
+  "Panturrilha sentada": "Seated_Calf_Raise",
+  "Prancha isométrica": "Plank",
+  "Puxada aberta": "Wide-Grip_Lat_Pulldown",
+  "Puxada triângulo": "V-Bar_Pulldown",
+  "Remada baixa": "Seated_Cable_Rows",
+  "Remada cavalinho (T-bar row)": "T-Bar_Row_with_Handle",
+  "Remada curvada pronada": "Bent_Over_Barbell_Row",
+  "Remada curvada supinada": "Bent_Over_Two-Dumbbell_Row_With_Palms_In",
+  "Remada máquina": "Seated_Cable_Rows",
+  "Remada máquina peck deck invertido": "Reverse_Machine_Flyes",
+  "Remada unilateral halter (serrote)": "One-Arm_Dumbbell_Row",
+  "Rosca Scott": "Preacher_Curl",
+  "Rosca alternada halteres": "Dumbbell_Alternate_Bicep_Curl",
+  "Rosca concentrada": "Concentration_Curls",
+  "Rosca corda polia": "Cable_Hammer_Curls_-_Rope_Attachment",
+  "Rosca direta": "Barbell_Curl",
+  "Rosca martelo": "Hammer_Curls",
+  "Stiff (RDL) halteres": "Stiff-Legged_Dumbbell_Deadlift",
+  "Supino declinado halteres": "Decline_Dumbbell_Bench_Press",
+  "Supino declinado máquina": "Leverage_Decline_Chest_Press",
+  "Supino inclinado barra": "Barbell_Incline_Bench_Press_-_Medium_Grip",
+  "Supino inclinado halteres": "Incline_Dumbbell_Press",
+  "Supino máquina (peck deck press)": "Machine_Bench_Press",
+  "Supino reto": "Barbell_Bench_Press_-_Medium_Grip",
+  "Tríceps coice (kickback)": "Tricep_Dumbbell_Kickback",
+  "Tríceps francês": "Cable_Rope_Overhead_Triceps_Extension",
+  "Tríceps pulley": "Triceps_Pushdown",
+  "Tríceps testa (skull crusher)": "EZ-Bar_Skullcrusher",
+  "Tríceps testa barra W": "EZ-Bar_Skullcrusher",
+};
+// Pra alguns exercícios com variação de equipamento (chip Barra/Halteres/
+// Máquina/Smith), o dataset tem uma entrada específica por equipamento — é
+// aqui que a diferenciação por variação de execução acontece de verdade.
+const EXERCISE_DEMO_VARIATIONS = {
+  "Supino reto": {
+    Barra: "Barbell_Bench_Press_-_Medium_Grip",
+    Halteres: "Dumbbell_Bench_Press",
+    Máquina: "Machine_Bench_Press",
+    Smith: "Smith_Machine_Bench_Press",
+  },
+  "Desenvolvimento militar": {
+    Barra: "Standing_Military_Press",
+    Halteres: "Dumbbell_Shoulder_Press",
+    Máquina: "Leverage_Shoulder_Press",
+    Smith: "Smith_Machine_Overhead_Shoulder_Press",
+  },
+  "Remada curvada pronada": {
+    Barra: "Bent_Over_Barbell_Row",
+    Halteres: "Bent_Over_Two-Dumbbell_Row",
+  },
+  "Elevação lateral": {
+    Halteres: "Side_Lateral_Raise",
+    Polia: "Cable_Seated_Lateral_Raise",
+  },
+};
+function exerciseDemoImages(name, variation) {
+  const id = EXERCISE_DEMO_VARIATIONS[name]?.[variation] || EXERCISE_DEMO_MAP[name];
+  if (!id) return null;
+  const enc = encodeURI(id);
+  return [`${EXERCISE_DEMO_BASE}${enc}/0.jpg`, `${EXERCISE_DEMO_BASE}${enc}/1.jpg`];
+}
+function youtubeSearchUrl(name) {
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(name + " execução correta")}`;
+}
 
 // Nome exibido (incluindo substituições/equivalentes) → grupo muscular. Como
 // o exercício logado é salvo pelo NOME (que pode ser um equivalente escolhido
@@ -2712,6 +2815,51 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
   );
 }
 
+// Vídeo de execução — na prática, duas fotos (início/fim do movimento) que
+// alternam sozinhas simulando o vídeo, porque hospedar vídeo de verdade pra
+// ~90 exercícios não é viável. Sempre oferece também o link de busca no
+// YouTube, que é vídeo de verdade — pros exercícios sem foto mapeada ainda,
+// é a única opção.
+function ExerciseDemoViewer({ name, variation }) {
+  const [open, setOpen] = useState(false);
+  const [frame, setFrame] = useState(0);
+  const images = useMemo(() => exerciseDemoImages(name, variation), [name, variation]);
+  useEffect(() => {
+    if (!open || !images) return;
+    setFrame(0);
+    const t = setInterval(() => setFrame((f) => (f === 0 ? 1 : 0)), 800);
+    return () => clearInterval(t);
+  }, [open, images]);
+
+  return (
+    <>
+      <button type="button" className="demo-toggle" onClick={() => setOpen((o) => !o)}>
+        <PlayCircle size={13} /> {open ? "Esconder execução" : "Ver execução"}
+      </button>
+      {open && (
+        <div className="exercise-demo">
+          {images ? (
+            <>
+              <img src={images[frame]} alt={`Execução: ${name}`} className="exercise-demo-img" />
+              <p className="hint" style={{ marginBottom: 0 }}>
+                Fotos de referência (free-exercise-db, domínio público) alternando pra simular o movimento — não é
+                vídeo de verdade.
+              </p>
+            </>
+          ) : (
+            <p className="muted" style={{ marginTop: 0 }}>
+              Ainda sem foto de referência pra esse exercício.
+            </p>
+          )}
+          <a className="link-btn demo-youtube-link" href={youtubeSearchUrl(name)} target="_blank" rel="noopener noreferrer">
+            <ExternalLink size={12} /> Buscar vídeo real no YouTube
+          </a>
+        </div>
+      )}
+    </>
+  );
+}
+
 function ExerciseCard({
   plan,
   effectiveName,
@@ -3037,6 +3185,7 @@ function ExerciseCard({
             )}
           </div>
           {tip && showTip && <div className="tip-text">{tip}</div>}
+          <ExerciseDemoViewer name={effectiveName} variation={variation} />
           {currentE1RM > 0 && (
             <div className="e1rm-note mono muted">1RM estimado: ~{currentE1RM}kg (méd. Epley/Brzycki/Lombardi)</div>
           )}
@@ -6833,6 +6982,18 @@ button:active:not(:disabled){transform:scale(0.96);}
   display:inline-flex;align-items:center;justify-content:center;font-family:'IBM Plex Sans',sans-serif;vertical-align:1px;
 }
 .tip-text{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4;font-style:italic;}
+
+.demo-toggle{
+  background:none;border:none;color:var(--push);font-size:11.5px;display:flex;align-items:center;gap:5px;
+  cursor:pointer;padding:0;margin-top:6px;font-family:'IBM Plex Sans',sans-serif;
+}
+.exercise-demo{margin-top:8px;padding:10px;background:var(--surface-2);border-radius:10px;}
+.exercise-demo-img{width:100%;max-width:320px;display:block;margin:0 auto;border-radius:8px;aspect-ratio:4/3;object-fit:cover;}
+.demo-youtube-link{
+  display:inline-flex;align-items:center;gap:5px;margin-top:8px;font-size:12px;color:var(--muted);
+  text-decoration:none;
+}
+.demo-youtube-link:hover{color:var(--push);}
 
 .share-card-svg-wrap{margin-top:12px;}
 .share-card-svg-wrap svg{width:100%;height:auto;border-radius:16px;display:block;}
