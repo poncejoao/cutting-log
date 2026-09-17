@@ -27,7 +27,7 @@ const DEFAULT_SCHEDULE = { 0: "Descanso", 1: "Push", 2: "Pull", 3: "Legs", 4: "P
 
 const PLAN = {
   Push: [
-    { id: "supino-reto", n: "Supino reto", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino máquina (peck deck press)", "Crucifixo reto halteres"] },
+    { id: "supino-reto", n: "Supino reto", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino máquina (peck deck press)", "Crucifixo reto halteres", "Supino declinado halteres", "Supino declinado máquina", "Crucifixo inclinado halteres"] },
     { id: "supino-inclinado", n: "Supino inclinado halteres", sets: 3, reps: "8-10", rir: "1-2", variations: ["Halteres", "Barra", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino inclinado barra", "Supino inclinado máquina", "Crucifixo inclinado halteres"] },
     { id: "desenvolvimento", n: "Desenvolvimento militar", sets: 3, reps: "8-10", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], equivalents: ["Desenvolvimento Arnold", "Desenvolvimento máquina"] },
     { id: "elevacao-lateral", n: "Elevação lateral", sets: 3, reps: "12-15", rir: "0-1", variations: ["Halteres", "Polia", "Máquina"], equivalents: ["Elevação lateral polia unilateral", "Elevação lateral máquina"] },
@@ -56,7 +56,7 @@ const PLAN = {
   // exercício físico, então equipamento/pegada escolhidos ficam valendo
   // independente de em qual divisão você está treinando naquele dia.
   Upper: [
-    { id: "supino-reto", n: "Supino reto", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino máquina (peck deck press)", "Crucifixo reto halteres"] },
+    { id: "supino-reto", n: "Supino reto", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], grips: ["Pronada", "Neutra"], equivalents: ["Supino máquina (peck deck press)", "Crucifixo reto halteres", "Supino declinado halteres", "Supino declinado máquina", "Crucifixo inclinado halteres"] },
     { id: "remada-curvada", n: "Remada curvada pronada", sets: 3, reps: "6-8", rir: "1-2", variations: ["Barra", "Halteres"], equivalents: ["Remada curvada supinada", "Remada cavalinho (T-bar row)", "Remada máquina"] },
     { id: "desenvolvimento", n: "Desenvolvimento militar", sets: 3, reps: "8-10", rir: "1-2", variations: ["Barra", "Halteres", "Máquina", "Smith"], equivalents: ["Desenvolvimento Arnold", "Desenvolvimento máquina"] },
     { id: "puxada-aberta", n: "Puxada aberta", sets: 3, reps: "8-10", rir: "1", variations: ["Pegada aberta", "Pegada supinada", "Pegada neutra", "Máquina"], equivalents: ["Barra fixa (pull-up)", "Puxada triângulo"] },
@@ -2040,11 +2040,6 @@ function HojeTab({ settings, setSettings, selectedDate, setSelectedDate, dayType
       </div>
 
       <div className="card">
-        <div className="card-head">Medidas corporais</div>
-        <MeasurementsForm dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} ready={ready} />
-      </div>
-
-      <div className="card">
         <div className="card-head">Sono</div>
         <SleepField dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} ready={ready} />
       </div>
@@ -2065,11 +2060,6 @@ function HojeTab({ settings, setSettings, selectedDate, setSelectedDate, dayType
       </div>
 
       <div className="card">
-        <div className="card-head">Cardio</div>
-        <CardioLogCard dayEntry={dayEntry} updateDay={updateDay} weightKg={latestWeight} />
-      </div>
-
-      <div className="card">
         <div className="card-head">Suplementos</div>
         <SupplementChecklist
           dayEntry={dayEntry}
@@ -2080,10 +2070,25 @@ function HojeTab({ settings, setSettings, selectedDate, setSelectedDate, dayType
         />
       </div>
 
-      <div className="card">
-        <div className="card-head">Foto do dia</div>
-        <PhotoDayCard dayEntry={dayEntry} updateDay={updateDay} showUndo={showUndo} />
-      </div>
+      <CollapsibleSection
+        id="hoje-mais"
+        title="Medidas, cardio e foto"
+        icon={Camera}
+        defaultOpen={!!dayEntry.measurements || (dayEntry.cardio || []).length > 0 || !!dayEntry.photo}
+      >
+        <div className="card">
+          <div className="card-head">Medidas corporais</div>
+          <MeasurementsForm dayEntry={dayEntry} updateDay={updateDay} selectedDate={selectedDate} ready={ready} />
+        </div>
+        <div className="card">
+          <div className="card-head">Cardio</div>
+          <CardioLogCard dayEntry={dayEntry} updateDay={updateDay} weightKg={latestWeight} />
+        </div>
+        <div className="card">
+          <div className="card-head">Foto do dia</div>
+          <PhotoDayCard dayEntry={dayEntry} updateDay={updateDay} showUndo={showUndo} />
+        </div>
+      </CollapsibleSection>
 
       <div className="card">
         <div className="card-head">Notas do dia</div>
@@ -3655,6 +3660,51 @@ function FavoriteRow({ fav, onAdd, onRename, onDelete }) {
 }
 
 // ---------------- Progresso ----------------
+// Seção recolhível — agrupa vários cards sob um cabeçalho clicável, com o
+// estado aberto/fechado lembrado por seção (localStorage, só conveniência
+// local, não sincroniza). Não esconde informação nenhuma pra sempre, só
+// reduz o quanto aparece de cara — tudo continua a 1 toque de distância.
+function CollapsibleSection({ id, title, icon: Icon, defaultOpen = false, children }) {
+  const hasStoredPref = useRef(false);
+  const [open, setOpen] = useState(() => {
+    try {
+      const raw = localStorage.getItem("cutting-log:section:" + id);
+      hasStoredPref.current = raw !== null;
+      return raw === null ? defaultOpen : raw === "1";
+    } catch (e) {
+      return defaultOpen;
+    }
+  });
+  // `defaultOpen` costuma depender de dados que carregam depois do primeiro
+  // render (storage é assíncrono) — sem isso, uma seção com alerta de
+  // verdade podia nascer fechada só porque os dados ainda não tinham chegado
+  // no instante exato do primeiro mount.
+  useEffect(() => {
+    if (!hasStoredPref.current && defaultOpen) setOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultOpen]);
+  function toggle() {
+    setOpen((o) => {
+      const next = !o;
+      try {
+        localStorage.setItem("cutting-log:section:" + id, next ? "1" : "0");
+      } catch (e) {}
+      return next;
+    });
+  }
+  return (
+    <div className="collapsible-section">
+      <button type="button" className="collapsible-header" onClick={toggle}>
+        <span className="collapsible-title">
+          {Icon && <Icon size={14} />} {title}
+        </span>
+        {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+      </button>
+      {open && <div className="collapsible-body stack">{children}</div>}
+    </div>
+  );
+}
+
 function ProgressoTab({ logs, settings, setSettings }) {
   const bwData = Object.entries(logs)
     .filter(([, v]) => v.bodyweight != null)
@@ -3724,163 +3774,158 @@ function ProgressoTab({ logs, settings, setSettings }) {
   const bwChartRef = useRef(null);
   const strengthChartRef = useRef(null);
 
+  const hasAlerts =
+    goalStatus || plateau || showTdeeShift || stagnation || overtraining || strengthPlateau || mesocycleStatus;
+
   return (
     <div className="stack">
       <WeekSummaryCard summary={weekSummary} />
 
       <MonthSummaryCard summary={monthSummary} />
 
-      <ShareSummaryCard logs={logs} settings={settings} />
-
-      {goalStatus && <GoalStatusCard status={goalStatus} />}
-
-      {plateau && <PlateauCard plateau={plateau} />}
-
-      {tdee && <TDEECard tdee={tdee} />}
-
-      {showTdeeShift && <TDEEShiftCard tdee={tdee} baseline={settings.lastTDEE} pct={tdeeShiftPct} onAccept={acceptNewTDEE} />}
-
-      {stagnation && <DeloadCard stagnation={stagnation} />}
-
-      {overtraining && <OvertrainingCard risk={overtraining} />}
-
-      {strengthPlateau && <StrengthPlateauCard plateau={strengthPlateau} />}
-
-      {mesocycleStatus && <MesocycleCard mesocycle={settings.mesocycle} status={mesocycleStatus} />}
-
-      {mesocycleClosing && (
-        <ThreeMonthsAgoCard
-          fromDate={mesocycleStatus.cycleStartDate}
-          result={mesocycleClosing}
-          title="Fechamento do mesociclo"
-          subtitle={`Do início do ciclo (${fmtDateLabel(mesocycleStatus.cycleStartDate)}) até hoje — semana de deload, hora de olhar o antes × depois.`}
-        />
-      )}
-
-      {settings.goalWeight != null && <WhatIfSimulator currentWeight={currentWeight} goalWeight={settings.goalWeight} />}
-
-      {rirTrend && <RirTrendCard trend={rirTrend} />}
-
-      {noteStats && <NoteInsightsCard stats={noteStats} />}
-
-      <RepRangePRCard prByRange={prByRepRange} />
-
-      <SubstitutionHistoryCard history={settings.substitutionHistory} />
-
-      <InjuryTracker injuries={settings.injuries} setSettings={setSettings} />
-
-      <PhotoTimelapseCard logs={logs} />
-
-      <div className="card">
-        <div className="card-head">Peso corporal</div>
-        {bwData.length >= 2 ? (
-          <>
-            <div ref={bwChartRef}>
-              <Suspense fallback={<ChartFallback height={180} />}>
-                <MiniLineChart
-                  data={bwData}
-                  dataKey="peso"
-                  secondaryDataKey="media"
-                  secondaryLabel="Média 7 dias"
-                  yDomain={["dataMin - 1", "dataMax + 1"]}
-                  height={180}
-                  valueSuffix="kg"
-                />
-              </Suspense>
-            </div>
-            <ShareChartButton containerRef={bwChartRef} filename="peso-corporal.png" />
-            <p className="hint">Linha sólida = peso do dia · linha pontilhada = média móvel de 7 dias (a tendência real, sem o ruído de água/sódio).</p>
-          </>
-        ) : (
-          <p className="muted">Registre o peso por alguns dias na aba Hoje pra ver o gráfico.</p>
+      <CollapsibleSection id="alertas" title="Alertas e metas" icon={AlertTriangle} defaultOpen={!!hasAlerts}>
+        {goalStatus && <GoalStatusCard status={goalStatus} />}
+        {plateau && <PlateauCard plateau={plateau} />}
+        {tdee && <TDEECard tdee={tdee} />}
+        {showTdeeShift && (
+          <TDEEShiftCard tdee={tdee} baseline={settings.lastTDEE} pct={tdeeShiftPct} onAccept={acceptNewTDEE} />
         )}
-        <div className="kcal-row">
-          <span className="mono">{currentWeight}kg</span>
-          <span className={"mono " + (delta <= 0 ? "tone-down" : "tone-up")}>
-            {delta > 0 ? "+" : ""}
-            {delta}kg desde o início
-          </span>
+        {stagnation && <DeloadCard stagnation={stagnation} />}
+        {overtraining && <OvertrainingCard risk={overtraining} />}
+        {strengthPlateau && <StrengthPlateauCard plateau={strengthPlateau} />}
+        {mesocycleStatus && <MesocycleCard mesocycle={settings.mesocycle} status={mesocycleStatus} />}
+        {mesocycleClosing && (
+          <ThreeMonthsAgoCard
+            fromDate={mesocycleStatus.cycleStartDate}
+            result={mesocycleClosing}
+            title="Fechamento do mesociclo"
+            subtitle={`Do início do ciclo (${fmtDateLabel(mesocycleStatus.cycleStartDate)}) até hoje — semana de deload, hora de olhar o antes × depois.`}
+          />
+        )}
+        {!hasAlerts && <p className="muted">Nada pra alertar agora — tudo dentro do esperado.</p>}
+      </CollapsibleSection>
+
+      <CollapsibleSection id="corpo" title="Corpo" icon={TrendingDown}>
+        <div className="card">
+          <div className="card-head">Peso corporal</div>
+          {bwData.length >= 2 ? (
+            <>
+              <div ref={bwChartRef}>
+                <Suspense fallback={<ChartFallback height={180} />}>
+                  <MiniLineChart
+                    data={bwData}
+                    dataKey="peso"
+                    secondaryDataKey="media"
+                    secondaryLabel="Média 7 dias"
+                    yDomain={["dataMin - 1", "dataMax + 1"]}
+                    height={180}
+                    valueSuffix="kg"
+                  />
+                </Suspense>
+              </div>
+              <ShareChartButton containerRef={bwChartRef} filename="peso-corporal.png" />
+              <p className="hint">
+                Linha sólida = peso do dia · linha pontilhada = média móvel de 7 dias (a tendência real, sem o ruído
+                de água/sódio).
+              </p>
+            </>
+          ) : (
+            <p className="muted">Registre o peso por alguns dias na aba Hoje pra ver o gráfico.</p>
+          )}
+          <div className="kcal-row">
+            <span className="mono">{currentWeight}kg</span>
+            <span className={"mono " + (delta <= 0 ? "tone-down" : "tone-up")}>
+              {delta > 0 ? "+" : ""}
+              {delta}kg desde o início
+            </span>
+          </div>
         </div>
-      </div>
+        <MeasurementsProgressCard logs={logs} />
+        {bodyFat != null && <BodyFatCard bodyFat={bodyFat} />}
+        <PhotoTimelapseCard logs={logs} />
+        <InjuryTracker injuries={settings.injuries} setSettings={setSettings} />
+        {noteStats && <NoteInsightsCard stats={noteStats} />}
+        {painHistory.length > 0 && <PainHistoryCard painHistory={painHistory} />}
+      </CollapsibleSection>
 
-      <div className="card">
-        <div className="card-head">Força geral</div>
-        {strengthData.length >= 2 ? (
-          <>
-            <div ref={strengthChartRef}>
-              <Suspense fallback={<ChartFallback height={170} />}>
-                <MiniLineChart
-                  data={strengthData}
-                  dataKey="indice"
-                  yDomain={["dataMin - 5", "dataMax + 5"]}
-                  height={170}
-                  valueSuffix="%"
-                />
-              </Suspense>
-            </div>
-            <ShareChartButton containerRef={strengthChartRef} filename="forca-geral.png" />
-          </>
-        ) : (
-          <p className="muted">
-            Registre {ANCHOR_LIFTS.join(", ")} por mais sessões pra ver a média de evolução dos 3.
+      <CollapsibleSection id="treino" title="Treino" icon={Dumbbell}>
+        <div className="card">
+          <div className="card-head">Força geral</div>
+          {strengthData.length >= 2 ? (
+            <>
+              <div ref={strengthChartRef}>
+                <Suspense fallback={<ChartFallback height={170} />}>
+                  <MiniLineChart
+                    data={strengthData}
+                    dataKey="indice"
+                    yDomain={["dataMin - 5", "dataMax + 5"]}
+                    height={170}
+                    valueSuffix="%"
+                  />
+                </Suspense>
+              </div>
+              <ShareChartButton containerRef={strengthChartRef} filename="forca-geral.png" />
+            </>
+          ) : (
+            <p className="muted">
+              Registre {ANCHOR_LIFTS.join(", ")} por mais sessões pra ver a média de evolução dos 3.
+            </p>
+          )}
+          <p className="hint">
+            Média de Supino reto, Remada curvada pronada e Agachamento livre, cada um relativo à primeira vez que foi
+            registrado (=100%) — assim nenhum dos três domina o gráfico só por pesar mais.
           </p>
+        </div>
+        <MuscleVolumeCard data={muscleVolume} />
+        {weekdayPattern && <WeekdayPatternCard pattern={weekdayPattern} />}
+        <HeatmapCard data={heatmapData} />
+        {(settings.phases || []).length > 0 && <PhaseComparisonCard logs={logs} phases={settings.phases} />}
+        <ExerciseProgressCard logs={logs} />
+        <PRHistoryCard prHistory={prHistory} />
+        <RepRangePRCard prByRange={prByRepRange} />
+        <SubstitutionHistoryCard history={settings.substitutionHistory} />
+      </CollapsibleSection>
+
+      <CollapsibleSection id="ferramentas" title="Ferramentas" icon={Lightbulb}>
+        <ShareSummaryCard logs={logs} settings={settings} />
+        {settings.goalWeight != null && (
+          <WhatIfSimulator currentWeight={currentWeight} goalWeight={settings.goalWeight} />
         )}
-        <p className="hint">
-          Média de Supino reto, Remada curvada pronada e Agachamento livre, cada um relativo à primeira vez que foi
-          registrado (=100%) — assim nenhum dos três domina o gráfico só por pesar mais.
-        </p>
-      </div>
+        {rirTrend && <RirTrendCard trend={rirTrend} />}
+        <ThreeMonthsAgoCard fromDate={threeMonthsAgo.date} result={threeMonthsAgo.compare} />
+        <DateCompareCard logs={logs} />
+        <PhotoCompareCard logs={logs} />
+      </CollapsibleSection>
 
-      <MuscleVolumeCard data={muscleVolume} />
-
-      {weekdayPattern && <WeekdayPatternCard pattern={weekdayPattern} />}
-
-      <HeatmapCard data={heatmapData} />
-
-      <ThreeMonthsAgoCard fromDate={threeMonthsAgo.date} result={threeMonthsAgo.compare} />
-
-      {(settings.phases || []).length > 0 && <PhaseComparisonCard logs={logs} phases={settings.phases} />}
-
-      <DateCompareCard logs={logs} />
-
-      <PhotoCompareCard logs={logs} />
-
-      <MeasurementsProgressCard logs={logs} />
-
-      {bodyFat != null && <BodyFatCard bodyFat={bodyFat} />}
-
-      <ExerciseProgressCard logs={logs} />
-
-      <PRHistoryCard prHistory={prHistory} />
-
-      {painHistory.length > 0 && <PainHistoryCard painHistory={painHistory} />}
-
-      <div className="card">
-        <div className="card-head">Histórico de treino</div>
-        {days.length === 0 && <p className="muted">Nenhum dia registrado ainda.</p>}
-        {days.slice(0, 14).map(([d, v]) => {
-          const dow = new Date(d + "T12:00:00").getDay();
-          const scheduled = settings.schedule[dow] || "Descanso";
-          const dt = v.dayTypeOverride || scheduled;
-          const wasSwapped = !!v.dayTypeOverride;
-          const exCount = v.exercises ? Object.keys(v.exercises).length : 0;
-          return (
-            <div className="hist-row" key={d}>
-              <span className="hist-date">{fmtDateLabel(d)}</span>
-              <span
-                className="hist-tag"
-                style={{ color: getDayColor(dt) }}
-                title={wasSwapped ? `Agendado: ${scheduled} · trocado pra ${dt}` : undefined}
-              >
-                {dt}
-                {wasSwapped && <span className="hist-swap-dot">●</span>}
-              </span>
-              <span className="muted mono">{isTrainingDay(dt) ? `${exCount}/${getPlanExercises(dt, settings).length} ex` : "—"}</span>
-              <span className="muted mono">{v.bodyweight ? `${v.bodyweight}kg` : ""}</span>
-            </div>
-          );
-        })}
-      </div>
+      <CollapsibleSection id="historico" title="Histórico de treino" icon={History}>
+        <div className="card">
+          {days.length === 0 && <p className="muted">Nenhum dia registrado ainda.</p>}
+          {days.slice(0, 14).map(([d, v]) => {
+            const dow = new Date(d + "T12:00:00").getDay();
+            const scheduled = settings.schedule[dow] || "Descanso";
+            const dt = v.dayTypeOverride || scheduled;
+            const wasSwapped = !!v.dayTypeOverride;
+            const exCount = v.exercises ? Object.keys(v.exercises).length : 0;
+            return (
+              <div className="hist-row" key={d}>
+                <span className="hist-date">{fmtDateLabel(d)}</span>
+                <span
+                  className="hist-tag"
+                  style={{ color: getDayColor(dt) }}
+                  title={wasSwapped ? `Agendado: ${scheduled} · trocado pra ${dt}` : undefined}
+                >
+                  {dt}
+                  {wasSwapped && <span className="hist-swap-dot">●</span>}
+                </span>
+                <span className="muted mono">
+                  {isTrainingDay(dt) ? `${exCount}/${getPlanExercises(dt, settings).length} ex` : "—"}
+                </span>
+                <span className="muted mono">{v.bodyweight ? `${v.bodyweight}kg` : ""}</span>
+              </div>
+            );
+          })}
+        </div>
+      </CollapsibleSection>
     </div>
   );
 }
@@ -6457,6 +6502,18 @@ button:active:not(:disabled){transform:scale(0.96);}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;box-shadow:0 2px 10px -6px var(--card-shadow);}
 .chart-loading{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12.5px;}
 .card-head{font-size:13px;color:var(--muted);margin-bottom:12px;font-weight:500;}
+
+.collapsible-section{margin-top:4px;}
+.collapsible-header{
+  width:100%;display:flex;align-items:center;justify-content:space-between;background:none;border:none;
+  border-bottom:1px solid var(--border);padding:14px 2px 10px;margin-bottom:2px;cursor:pointer;color:var(--text);
+  font-family:'IBM Plex Sans',sans-serif;
+}
+.collapsible-title{
+  display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.04em;
+}
+.collapsible-body{margin-top:12px;}
 
 .macro-row{margin-bottom:12px;}
 .macro-row:last-of-type{margin-bottom:8px;}
