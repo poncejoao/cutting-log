@@ -239,104 +239,79 @@ const EXERCISE_TIPS = {
   "abdomen": "Movimento vem do abdômen, não do quadril — evita balançar as pernas pra ajudar.",
 };
 
-// Fotos de referência de execução (início/fim do movimento, que o app
-// alterna pra simular vídeo) — vindas do free-exercise-db
-// (github.com/yuhonas/free-exercise-db), domínio público (Unlicense),
-// hospedadas no GitHub. Cada valor é o id da pasta de imagens no dataset;
-// mapeado a dedo, conferindo cada foto, pra garantir que bate com o nome em
-// português. Exercício sem entrada aqui ainda funciona — só cai direto pro
-// link de busca no YouTube.
-const EXERCISE_DEMO_BASE = "https://raw.githubusercontent.com/yuhonas/free-exercise-db/main/exercises/";
-const EXERCISE_DEMO_MAP = {
-  "Abdômen": "Crunches",
-  "Agachamento búlgaro": "Split_Squat_with_Dumbbells",
-  "Agachamento livre": "Barbell_Squat",
-  "Agachamento sissy": "Weighted_Sissy_Squat",
-  "Barra fixa (pull-up)": "Pullups",
-  "Cadeira extensora": "Leg_Extensions",
-  "Crucifixo inclinado halteres": "Incline_Dumbbell_Flyes",
-  "Crucifixo invertido halteres": "Seated_Bent-Over_Rear_Delt_Raise",
-  "Crucifixo invertido máquina": "Reverse_Machine_Flyes",
-  "Crucifixo reto halteres": "Dumbbell_Flyes",
-  "Desenvolvimento Arnold": "Arnold_Dumbbell_Press",
-  "Desenvolvimento militar": "Standing_Military_Press",
-  "Desenvolvimento máquina": "Leverage_Shoulder_Press",
-  "Elevação de pernas": "Hanging_Leg_Raise",
-  "Elevação lateral": "Side_Lateral_Raise",
-  "Elevação lateral polia unilateral": "Cable_Seated_Lateral_Raise",
-  "Extensão lombar solo (superman)": "Superman",
-  "Face pull": "Face_Pull",
-  "Flexora sentado": "Seated_Leg_Curl",
-  "Good morning leve": "Good_Morning",
-  "Hack machine": "Hack_Squat",
-  "Leg press 45°": "Leg_Press",
-  "Lombar máquina": "Hyperextensions_Back_Extensions",
-  "Mergulho no banco (bench dip)": "Bench_Dips",
-  "Mesa flexora": "Lying_Leg_Curls",
-  "Panturrilha Smith": "Smith_Machine_Calf_Raise",
-  "Panturrilha burrinho (donkey calf raise)": "Donkey_Calf_Raises",
-  "Panturrilha em pé": "Standing_Calf_Raises",
-  "Panturrilha no leg press": "Calf_Press_On_The_Leg_Press_Machine",
-  "Panturrilha sentada": "Seated_Calf_Raise",
-  "Prancha isométrica": "Plank",
-  "Puxada aberta": "Wide-Grip_Lat_Pulldown",
-  "Puxada triângulo": "V-Bar_Pulldown",
-  "Remada baixa": "Seated_Cable_Rows",
-  "Remada cavalinho (T-bar row)": "T-Bar_Row_with_Handle",
-  "Remada curvada pronada": "Bent_Over_Barbell_Row",
-  "Remada curvada supinada": "Bent_Over_Two-Dumbbell_Row_With_Palms_In",
-  "Remada máquina": "Seated_Cable_Rows",
-  "Remada máquina peck deck invertido": "Reverse_Machine_Flyes",
-  "Remada unilateral halter (serrote)": "One-Arm_Dumbbell_Row",
-  "Rosca Scott": "Preacher_Curl",
-  "Rosca alternada halteres": "Dumbbell_Alternate_Bicep_Curl",
-  "Rosca concentrada": "Concentration_Curls",
-  "Rosca corda polia": "Cable_Hammer_Curls_-_Rope_Attachment",
-  "Rosca direta": "Barbell_Curl",
-  "Rosca martelo": "Hammer_Curls",
-  "Stiff (RDL) halteres": "Stiff-Legged_Dumbbell_Deadlift",
-  "Supino declinado halteres": "Decline_Dumbbell_Bench_Press",
-  "Supino declinado máquina": "Leverage_Decline_Chest_Press",
-  "Supino inclinado barra": "Barbell_Incline_Bench_Press_-_Medium_Grip",
-  "Supino inclinado halteres": "Incline_Dumbbell_Press",
-  "Supino máquina (peck deck press)": "Machine_Bench_Press",
-  "Supino reto": "Barbell_Bench_Press_-_Medium_Grip",
-  "Tríceps coice (kickback)": "Tricep_Dumbbell_Kickback",
-  "Tríceps francês": "Cable_Rope_Overhead_Triceps_Extension",
-  "Tríceps pulley": "Triceps_Pushdown",
-  "Tríceps testa (skull crusher)": "EZ-Bar_Skullcrusher",
-  "Tríceps testa barra W": "EZ-Bar_Skullcrusher",
+// Vídeo real de execução — IDs de vídeos do YouTube curados um a um (busca +
+// checagem manual de cada exercício e cada variação de equipamento), porque
+// a busca embutida do YouTube (listType=search) não funciona mais em iframe.
+// Exercício/variação sem entrada aqui cai pro link de busca no YouTube.
+const EXERCISE_VIDEO_MAP = {
+  "Supino máquina (peck deck press)": "-SO_MVV-eUE",
+  "Crucifixo reto halteres": "ZjIKUMtW37c",
+  "Supino declinado halteres": "ZsotBDAbjyA",
+  "Supino declinado máquina": "CQswI6apcu4",
+  "Crucifixo inclinado halteres": "EOr8ogwVF-Q",
+  "Supino inclinado barra": "F9MQy4_cbZc",
+  "Supino inclinado máquina": "bZtXNt7gbPY",
+  "Desenvolvimento Arnold": "ijkw1TUmzJc",
+  "Desenvolvimento máquina": "oBF4YIwh_w8",
+  "Elevação lateral polia unilateral": "iO4OdqgaLcE",
+  "Elevação lateral máquina": "jTtN4KpiRLE",
+  "Tríceps testa (skull crusher)": "oqob5MHbzBc",
+  "Mergulho no banco (bench dip)": "dZTn_ZlDrEQ",
+  "Tríceps testa barra W": "hozeUvcJx0U",
+  "Tríceps coice (kickback)": "dnyUwaA7Pok",
+  "Remada curvada supinada": "0BfB6WHRks8",
+  "Remada cavalinho (T-bar row)": "b-n8m51UIxc",
+  "Remada máquina": "uQNhosSt0eo",
+  "Barra fixa (pull-up)": "oH-NrOccUOg",
+  "Puxada triângulo": "fhHHRe8bAfY",
+  "Remada unilateral halter (serrote)": "K25eTWoEOWU",
+  "Remada máquina peck deck invertido": "5-HhI9yCuUo",
+  "Crucifixo invertido máquina": "msYitT5kUns",
+  "Crucifixo invertido halteres": "neiVTL2U5Qo",
+  "Rosca Scott": "zaAx8tPX64k",
+  "Rosca concentrada": "nIUjhJMEmFk",
+  "Rosca alternada halteres": "nAqWZprW4yY",
+  "Rosca corda polia": "3MpjvTBw22w",
+  "Extensão lombar solo (superman)": "4mY7IewWVJ8",
+  "Good morning leve": "hmEGmdYy1kU",
+  "Leg press 45°": "waAxlYvtCcI",
+  "Hack machine": "lQo21In1LZs",
+  "Agachamento búlgaro": "qepBcFFMzhM",
+  "Agachamento sissy": "zUvPKRrPYwI",
+  "Stiff (RDL) halteres": "601YoPL6y6E",
+  "Flexora sentado": "dMYsB4Eb2BY",
+  "Panturrilha no leg press": "F7_8z_7Kwks",
+  "Panturrilha Smith": "cXuj3JWPfFE",
+  "Panturrilha burrinho (donkey calf raise)": "5PUKDQu1Qis",
+  "Prancha isométrica": "OnVIGDpnMow",
+  "Elevação de pernas": "IIMzCZXqIeA",
 };
-// Pra alguns exercícios com variação de equipamento (chip Barra/Halteres/
-// Máquina/Smith), o dataset tem uma entrada específica por equipamento — é
-// aqui que a diferenciação por variação de execução acontece de verdade.
-const EXERCISE_DEMO_VARIATIONS = {
-  "Supino reto": {
-    Barra: "Barbell_Bench_Press_-_Medium_Grip",
-    Halteres: "Dumbbell_Bench_Press",
-    Máquina: "Machine_Bench_Press",
-    Smith: "Smith_Machine_Bench_Press",
-  },
-  "Desenvolvimento militar": {
-    Barra: "Standing_Military_Press",
-    Halteres: "Dumbbell_Shoulder_Press",
-    Máquina: "Leverage_Shoulder_Press",
-    Smith: "Smith_Machine_Overhead_Shoulder_Press",
-  },
-  "Remada curvada pronada": {
-    Barra: "Bent_Over_Barbell_Row",
-    Halteres: "Bent_Over_Two-Dumbbell_Row",
-  },
-  "Elevação lateral": {
-    Halteres: "Side_Lateral_Raise",
-    Polia: "Cable_Seated_Lateral_Raise",
-  },
+// Pra exercícios com variação de equipamento (chip Barra/Halteres/Máquina/
+// Smith/etc), um vídeo verificado por variação — é aqui que a diferenciação
+// por forma de execução realmente acontece, como o usuário pediu.
+const EXERCISE_VIDEO_VARIATIONS = {
+  "Supino reto": { Barra: "ZN7SuDQpNMk", Halteres: "6V9Ru5It8uk", Máquina: "np22BPdFZj0", Smith: "I9dUhe2W0YQ" },
+  "Supino inclinado halteres": { Halteres: "G-i3jMIbDmo", Barra: "F9MQy4_cbZc", Máquina: "bZtXNt7gbPY", Smith: "HdI6iAqZC1I" },
+  "Desenvolvimento militar": { Barra: "ZD3-TjUdiUo", Halteres: "eufDL9MmF8A" },
+  "Elevação lateral": { Halteres: "dnbyKDEyHx4", Polia: "0Ppcp2v91iY", Máquina: "jTtN4KpiRLE" },
+  "Tríceps pulley": { "Barra reta": "wQdCw93LkcI", "Barra V": "LA5-0_DCd1w", Corda: "M-DTY40JG9M", "Puxador unilateral": "ohwBK371XRQ" },
+  "Tríceps francês": { Barra: "hmfbXrXH2tM", Halteres: "_WSadl0-dfU", "Corda (polia)": "-j2irrajCLg" },
+  "Remada curvada pronada": { Barra: "g_lmBmIWUs4", Halteres: "T0cMo0KJXvs" },
+  "Puxada aberta": { "Pegada aberta": "yp14vDyCUJA", "Pegada supinada": "EswwaKw_MHw", "Pegada neutra": "76zk3CD2JJQ", Máquina: "LtrLk1yHMhw" },
+  "Remada baixa": { Triângulo: "7eTxBNf4RQ4", "Barra reta": "R_a8kgA6cPY", "Pegada aberta": "1HUJIDEvD6w" },
+  "Face pull": { Corda: "kYMTJAx_dTM", "Barra reta": "On1ysBmSWrA" },
+  "Rosca direta": { "Barra reta": "n158HS07tOE", "Barra W": "70YZuawsDpg", Halteres: "p2S4e8xRCkI" },
+  "Rosca martelo": { Halteres: "HgTwegZjTg8", "Corda (polia)": "Le9cUbODJHY" },
+  "Lombar máquina": { Máquina: "-tCYvqeVYLk", "Extensão lombar 45°": "chsSf3oQc1I" },
+  "Agachamento livre": { "Barra livre": "rM6SDUdl9fs", Smith: "uCT5wfQIQpk", "Barra segura (safety bar)": "FZmNRvX_dBk" },
+  "Cadeira extensora": { Bilateral: "RHgqvYAed_8", Unilateral: "Os_byCyi6MI" },
+  "Mesa flexora": { Deitado: "sWSm1pWb3lw", Sentado: "dMYsB4Eb2BY", "Em pé unilateral": "T--10UN1jKs" },
+  "Panturrilha em pé": { "Máquina em pé": "Hsho8B6ZNhE", Smith: "ybjCv9Zek6I", Halteres: "cklp_Xh5V8M" },
+  "Panturrilha sentada": { "Máquina sentado": "qpVKOlniMXo" },
+  "Abdômen": { Máquina: "pR7WtwTOOTw", Solo: "hZVIstfFsIc", "Polia (cabo)": "I64bjVbs7XI" },
 };
-function exerciseDemoImages(name, variation) {
-  const id = EXERCISE_DEMO_VARIATIONS[name]?.[variation] || EXERCISE_DEMO_MAP[name];
-  if (!id) return null;
-  const enc = encodeURI(id);
-  return [`${EXERCISE_DEMO_BASE}${enc}/0.jpg`, `${EXERCISE_DEMO_BASE}${enc}/1.jpg`];
+function exerciseVideoId(name, variation) {
+  return EXERCISE_VIDEO_VARIATIONS[name]?.[variation] || EXERCISE_VIDEO_MAP[name] || null;
 }
 function youtubeSearchUrl(name) {
   return `https://www.youtube.com/results?search_query=${encodeURIComponent(name + " execução correta")}`;
@@ -2815,44 +2790,37 @@ function TreinoTab({ dayType, dayEntry, updateDay, exerciseHistory, selectedDate
   );
 }
 
-// Vídeo de execução — na prática, duas fotos (início/fim do movimento) que
-// alternam sozinhas simulando o vídeo, porque hospedar vídeo de verdade pra
-// ~90 exercícios não é viável. Sempre oferece também o link de busca no
-// YouTube, que é vídeo de verdade — pros exercícios sem foto mapeada ainda,
-// é a única opção.
+// Vídeo real de execução, embutido via iframe do YouTube — um ID curado por
+// exercício e, quando existe variação de equipamento, um ID por variação.
 function ExerciseDemoViewer({ name, variation }) {
   const [open, setOpen] = useState(false);
-  const [frame, setFrame] = useState(0);
-  const images = useMemo(() => exerciseDemoImages(name, variation), [name, variation]);
-  useEffect(() => {
-    if (!open || !images) return;
-    setFrame(0);
-    const t = setInterval(() => setFrame((f) => (f === 0 ? 1 : 0)), 800);
-    return () => clearInterval(t);
-  }, [open, images]);
+  const videoId = useMemo(() => exerciseVideoId(name, variation), [name, variation]);
 
   return (
     <>
       <button type="button" className="demo-toggle" onClick={() => setOpen((o) => !o)}>
-        <PlayCircle size={13} /> {open ? "Esconder execução" : "Ver execução"}
+        <PlayCircle size={13} /> {open ? "Esconder vídeo" : "Ver vídeo de execução"}
       </button>
       {open && (
         <div className="exercise-demo">
-          {images ? (
-            <>
-              <img src={images[frame]} alt={`Execução: ${name}`} className="exercise-demo-img" />
-              <p className="hint" style={{ marginBottom: 0 }}>
-                Fotos de referência (free-exercise-db, domínio público) alternando pra simular o movimento — não é
-                vídeo de verdade.
-              </p>
-            </>
+          {videoId ? (
+            <div className="exercise-demo-video-wrap">
+              <iframe
+                className="exercise-demo-video"
+                src={`https://www.youtube.com/embed/${videoId}`}
+                title={`Execução: ${name}${variation ? " – " + variation : ""}`}
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                loading="lazy"
+              />
+            </div>
           ) : (
             <p className="muted" style={{ marginTop: 0 }}>
-              Ainda sem foto de referência pra esse exercício.
+              Ainda sem vídeo curado pra essa variação.
             </p>
           )}
           <a className="link-btn demo-youtube-link" href={youtubeSearchUrl(name)} target="_blank" rel="noopener noreferrer">
-            <ExternalLink size={12} /> Buscar vídeo real no YouTube
+            <ExternalLink size={12} /> Buscar outro vídeo no YouTube
           </a>
         </div>
       )}
@@ -6988,7 +6956,8 @@ button:active:not(:disabled){transform:scale(0.96);}
   cursor:pointer;padding:0;margin-top:6px;font-family:'IBM Plex Sans',sans-serif;
 }
 .exercise-demo{margin-top:8px;padding:10px;background:var(--surface-2);border-radius:10px;}
-.exercise-demo-img{width:100%;max-width:320px;display:block;margin:0 auto;border-radius:8px;aspect-ratio:4/3;object-fit:cover;}
+.exercise-demo-video-wrap{position:relative;width:100%;aspect-ratio:16/9;border-radius:8px;overflow:hidden;background:#000;}
+.exercise-demo-video{position:absolute;inset:0;width:100%;height:100%;border:0;}
 .demo-youtube-link{
   display:inline-flex;align-items:center;gap:5px;margin-top:8px;font-size:12px;color:var(--muted);
   text-decoration:none;
