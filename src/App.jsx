@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from "react";
-import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff, Mic, Coffee, Activity, Percent, PauseCircle, Gauge, PlayCircle, ExternalLink } from "lucide-react";
+import React, { useState, useEffect, useRef, useMemo, useCallback, Suspense, lazy } from "react";
+import { Dumbbell, UtensilsCrossed, TrendingUp, TrendingDown, Home, Plus, Minus, Check, Settings, ChevronRight, ChevronUp, ChevronDown, Flame, X, Repeat, Download, Star, Pencil, Trash2, Trophy, CalendarRange, Cloud, LogOut, Eye, EyeOff, Share2, Timer, Droplet, Camera, BarChart3, Link2, Clock, AlertTriangle, Lightbulb, Pill, FileText, History, Bell, BellOff, Mic, Coffee, Activity, Percent, PauseCircle, Gauge, PlayCircle, ExternalLink, CloudOff } from "lucide-react";
 import { supabase } from "./supabaseClient.js";
 import { isPushSupported, getPushPermission, isPushEnabled, enablePush, disablePush } from "./push.js";
 
@@ -1489,6 +1489,24 @@ export default function App() {
   // sessão — evita que um local incompleto (ex: reinstalação do app) seja
   // empurrado e sobrescreva um backup bom antes de dar tempo de mesclar.
   const cloudSyncedOnce = useRef(false);
+  // Refs com o valor mais recente de session/logs, pra funções chamadas fora
+  // do ciclo normal de render (ex: no retorno de foco do app) sempre lerem o
+  // estado atual sem precisar recriar o listener a cada mudança.
+  const sessionRef = useRef(null);
+  const logsRef = useRef({});
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+  useEffect(() => {
+    logsRef.current = logs;
+  }, [logs]);
+  const [cloudToast, setCloudToast] = useState(null);
+  const cloudToastTimerRef = useRef(null);
+  function showCloudToast(message) {
+    if (cloudToastTimerRef.current) clearTimeout(cloudToastTimerRef.current);
+    setCloudToast(message);
+    cloudToastTimerRef.current = setTimeout(() => setCloudToast(null), 5000);
+  }
 
   // Toast de "desfazer" — usado por ações de apagar que são fáceis de tocar
   // sem querer (remover refeição, remover foto). Some sozinho em 5s.
@@ -1517,6 +1535,25 @@ export default function App() {
   }
 
   const [showChangelog, setShowChangelog] = useState(false);
+
+  // Aviso único: instalado como app na tela de início (iOS/Android) guarda
+  // os dados num compartimento separado do navegador normal — se apagar o
+  // ícone, apaga esse compartimento junto. Só mostra pra quem realmente abriu
+  // no modo instalado (é aí que o risco existe), uma vez só.
+  const [showPwaWarn, setShowPwaWarn] = useState(false);
+  useEffect(() => {
+    if (!ready) return;
+    const isStandalone =
+      window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+    if (!isStandalone) return;
+    const alreadySeen = localStorage.getItem("cutting-log:pwaWarnSeen");
+    if (!alreadySeen) setShowPwaWarn(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+  function dismissPwaWarn() {
+    localStorage.setItem("cutting-log:pwaWarnSeen", "1");
+    setShowPwaWarn(false);
+  }
 
   useEffect(() => {
     (async () => {
@@ -1551,36 +1588,62 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Ao logar, MESCLA o que já tinha na nuvem com o que tem local — nunca
-  // sobrescreve. Cada dia (chave de data) que só existe de um lado é
-  // mantido; se o mesmo dia existir dos dois lados, o local vence (é o mais
-  // recente/vivo). Antes isso só puxava da nuvem se o local estivesse
-  // 100% vazio, o que é frágil: um local parcialmente zerado (ex: app
-  // reinstalado) passava no teste de "não vazio" e um dia acabou sendo
-  // empurrado por cima de um backup bom, apagando dias que só existiam na
-  // nuvem. Mesclar por dia é seguro nos dois cenários.
+  // MESCLA o que já tinha na nuvem com o que tem local — nunca sobrescreve.
+  // Cada dia (chave de data) que só existe de um lado é mantido; se o mesmo
+  // dia existir dos dois lados, o local vence (é o mais recente/vivo). Antes
+  // isso só puxava da nuvem uma vez, e só se o local estivesse 100% vazio —
+  // frágil: um local parcialmente zerado (ex: app reinstalado) passava no
+  // teste de "não vazio" e um dia acabou sendo empurrado por cima de um
+  // backup bom, apagando dias que só existiam na nuvem. Mesclar por dia é
+  // seguro nos dois cenários, e reutilizável: roda no load e de novo toda
+  // vez que o app volta a ficar visível, então o app se autocorrige sozinho
+  // em vez de confiar numa sincronização única.
+  const pullAndMergeCloud = useCallback(async () => {
+    const sess = sessionRef.current;
+    if (!sess) return;
+    const { data, error } = await supabase
+      .from("backups")
+      .select("logs,settings")
+      .eq("user_id", sess.user.id)
+      .maybeSingle();
+    if (error) {
+      console.error("cloud pull failed", error);
+      return;
+    }
+    if (data) {
+      if (data.logs) {
+        const newDays = Object.keys(data.logs).filter((d) => !(d in logsRef.current)).length;
+        setLogs((prev) => ({ ...data.logs, ...prev }));
+        if (newDays > 0) {
+          showCloudToast(`${newDays} dia(s) restaurado(s) da nuvem`);
+        }
+      }
+      if (data.settings) setSettings((prev) => ({ ...data.settings, ...prev }));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (!ready || !session || pulledFromCloud.current) return;
     pulledFromCloud.current = true;
-    (async () => {
-      const { data, error } = await supabase
-        .from("backups")
-        .select("logs,settings")
-        .eq("user_id", session.user.id)
-        .maybeSingle();
-      if (error) {
-        console.error("cloud pull failed", error);
-        cloudSyncedOnce.current = true;
-        return;
-      }
-      if (data) {
-        if (data.logs) setLogs((prev) => ({ ...data.logs, ...prev }));
-        if (data.settings) setSettings((prev) => ({ ...data.settings, ...prev }));
-      }
+    pullAndMergeCloud().finally(() => {
       cloudSyncedOnce.current = true;
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, session]);
+    });
+  }, [ready, session, pullAndMergeCloud]);
+
+  // Reabrir o app (voltar de background, trocar de aba e voltar) dispara a
+  // mesma mesclagem de novo — cobre o caso de outro aparelho ter escrito na
+  // nuvem enquanto esse ficou em segundo plano.
+  useEffect(() => {
+    if (!ready) return;
+    function onVisible() {
+      if (document.visibilityState === "visible" && sessionRef.current && cloudSyncedOnce.current) {
+        pullAndMergeCloud();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [ready, pullAndMergeCloud]);
 
   // Empurra pra nuvem sempre que logs/settings mudam, com um pequeno atraso
   // (não precisa da urgência do flush local — o localStorage já é a fonte
@@ -1669,6 +1732,17 @@ export default function App() {
 
   const streak = useMemo(() => computeStreak(logs), [logs]);
 
+  // Lembrete de exportar backup — insistente mas discreto: só um pontinho no
+  // ícone de Configurações, sem poluir a tela principal com mais um banner.
+  const exportOverdue = useMemo(() => {
+    if (Object.keys(logs).length === 0) return false;
+    if (!settings.lastBackupExportAt) return true;
+    const daysSince = Math.floor(
+      (new Date(todayISO() + "T12:00:00") - new Date(settings.lastBackupExportAt + "T12:00:00")) / 86400000
+    );
+    return daysSince >= (settings.backupReminderDays || 30);
+  }, [logs, settings.lastBackupExportAt, settings.backupReminderDays]);
+
   return (
     <div className="app" style={{ "--font-scale": settings.fontScale || 1 }}>
       <style>{CSS}</style>
@@ -1686,7 +1760,7 @@ export default function App() {
               <Flame size={12} /> {streak}
             </div>
           )}
-          {session && (
+          {session ? (
             <button
               className="icon-btn cloud-status-btn"
               onClick={() => setShowSettings(true)}
@@ -1697,9 +1771,19 @@ export default function App() {
             >
               <Cloud size={16} className={"cloud-status-icon " + cloudStatus} />
             </button>
+          ) : (
+            <button
+              className="icon-btn cloud-status-btn"
+              onClick={() => setShowSettings(true)}
+              aria-label="Sem backup na nuvem"
+              title="Sem backup na nuvem ativado — toque pra ativar"
+            >
+              <CloudOff size={16} className="cloud-status-icon off" />
+            </button>
           )}
-          <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Configurações">
+          <button className="icon-btn settings-btn" onClick={() => setShowSettings(true)} aria-label="Configurações">
             <Settings size={18} />
+            {exportOverdue && <span className="settings-badge-dot" title="Backup exportado faz tempo" />}
           </button>
         </div>
       </header>
@@ -1766,6 +1850,12 @@ export default function App() {
           </button>
         </div>
       )}
+      {cloudToast && (
+        <div className="cloud-toast">
+          <Cloud size={13} />
+          <span>{cloudToast}</span>
+        </div>
+      )}
 
       <nav className="tabbar">
         <TabBtn icon={Home} label="Hoje" active={tab === "hoje"} onClick={() => setTab("hoje")} />
@@ -1794,6 +1884,17 @@ export default function App() {
       {showTour && <OnboardingTour onDone={dismissTour} />}
 
       {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
+
+      {showPwaWarn && (
+        <PwaStorageWarningModal
+          onClose={dismissPwaWarn}
+          hasCloudBackup={!!session}
+          onOpenSettings={() => {
+            dismissPwaWarn();
+            setShowSettings(true);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1954,6 +2055,47 @@ function ChangelogModal({ onClose }) {
               </ul>
             </div>
           ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PwaStorageWarningModal({ onClose, hasCloudBackup, onOpenSettings }) {
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head">
+          <span>Um aviso importante</span>
+          <button className="icon-btn" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="stack">
+          <div className="card">
+            <div className="card-head">
+              <AlertTriangle size={15} style={{ verticalAlign: "-2px", marginRight: 6 }} />
+              App instalado guarda dados à parte
+            </div>
+            <p className="muted export-hint">
+              Você tá usando o Cutting Log instalado na tela de início. Nesse modo, o celular guarda os dados num
+              lugar separado do navegador normal — se algum dia você <strong>apagar esse ícone</strong>, apaga os
+              dados guardados nele junto, sem volta.
+            </p>
+            <p className="muted export-hint">
+              {hasCloudBackup
+                ? "Como seu backup na nuvem já tá ativo, os dados continuam protegidos mesmo assim — só confere o status de sincronização (ícone de nuvem no topo) antes de apagar o app."
+                : "Ative o backup na nuvem agora nas Configurações — sem ele, apagar o app apaga os dados de vez."}
+            </p>
+            {!hasCloudBackup && (
+              <button className="btn-primary" onClick={onOpenSettings}>
+                <Cloud size={15} /> Ativar backup na nuvem
+              </button>
+            )}
+          </div>
+          <button className="btn-secondary" onClick={onClose}>
+            <Check size={15} /> Entendi
+          </button>
         </div>
       </div>
     </div>
@@ -5921,6 +6063,15 @@ function SettingsSheet({
     };
   }, [logs, settings]);
 
+  const exportOverdue = useMemo(() => {
+    if (Object.keys(logs).length === 0) return false;
+    if (!settings.lastBackupExportAt) return true;
+    const daysSince = Math.floor(
+      (new Date(todayISO() + "T12:00:00") - new Date(settings.lastBackupExportAt + "T12:00:00")) / 86400000
+    );
+    return daysSince >= (settings.backupReminderDays || 30);
+  }, [logs, settings.lastBackupExportAt, settings.backupReminderDays]);
+
   function addPhase() {
     if (!newPhase.name.trim() || !newPhase.start) return;
     const phase = {
@@ -6360,6 +6511,14 @@ function SettingsSheet({
             <p className="muted export-hint">
               Baixa tudo que foi registrado (treino, dieta, peso, água, cafeína, sono, cardio, medidas) pra analisar depois num Excel/Sheets.
             </p>
+            {exportOverdue && (
+              <p className="sync-age-warn">
+                <AlertTriangle size={12} style={{ verticalAlign: "-1px", marginRight: 4 }} />
+                {settings.lastBackupExportAt
+                  ? "Faz tempo que você não exporta um backup — vale gerar um novo."
+                  : "Você ainda não exportou nenhum backup — gera um pra ter uma cópia fora do app."}
+              </p>
+            )}
             <button className="btn-secondary" onClick={() => exportCSV(logs)}>
               <Download size={15} /> Exportar resumo diário (CSV)
             </button>
@@ -6656,7 +6815,19 @@ button:active:not(:disabled){transform:scale(0.96);}
 .cloud-status-icon.synced{color:var(--pull);}
 .cloud-status-icon.error{color:var(--legs);}
 .cloud-status-icon.syncing{color:var(--push);animation:cloud-pulse 1s ease-in-out infinite;}
+.cloud-status-icon.off{color:var(--muted);}
 @keyframes cloud-pulse{0%,100%{opacity:1;}50%{opacity:0.35;}}
+.settings-btn{position:relative;}
+.settings-badge-dot{
+  position:absolute;top:6px;right:6px;width:8px;height:8px;border-radius:50%;
+  background:var(--push);border:1.5px solid var(--surface-2);
+}
+.cloud-toast{
+  position:fixed;left:50%;bottom:88px;transform:translateX(-50%);z-index:60;
+  background:var(--surface-2);border:1px solid var(--border);border-radius:10px;
+  padding:9px 14px;font-size:12.5px;color:var(--text);box-shadow:0 6px 18px rgba(0,0,0,0.25);
+  display:flex;align-items:center;gap:7px;max-width:88vw;
+}
 
 .content{flex:1;padding:16px;}
 .stack{display:flex;flex-direction:column;gap:14px;}
